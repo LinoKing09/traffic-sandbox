@@ -247,6 +247,28 @@ function drawRampConnector(ctx, N) {
   }
   ctx.lineCap = 'butt';
 }
+// Randlinien entlang der Verbindung (nach dem Asphalt zeichnen)
+function drawRampConnectorLines(ctx, N) {
+  if (View.scale < 1) return;
+  ctx.strokeStyle = COL.mark; ctx.lineWidth = 0.15; ctx.setLineDash([]);
+  for (const m of N.moves) {
+    if (m.inLane.link.edge !== N.ramp.r && m.outLink.edge !== N.ramp.r) continue;
+    const S = m.xs.length - 1;
+    for (const side of [1, -1]) {
+      ctx.beginPath();
+      for (let i = 0; i <= S; i++) {
+        const a = Math.max(0, i - 1), b = Math.min(S, i + 1);
+        let hx = m.xs[b] - m.xs[a], hy = m.ys[b] - m.ys[a]; const l = Math.hypot(hx, hy) || 1; hx /= l; hy /= l;
+        const o = (LANE_W / 2 - 0.35) * side;
+        const x = m.xs[i] - hy * o, y = m.ys[i] + hx * o;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      if (side < 0) ctx.setLineDash([1.5, 1.5]); else ctx.setLineDash([]);
+      ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+}
 
 // Markierungen ueber einen Knick zwischen zwei Strassen hinweg weiterfuehren
 function drawJointMarks(ctx, N) {
@@ -663,6 +685,7 @@ function render() {
   for (const e of ground) drawMarkings(ctx, e);
   for (const N of nodes) if (N.edges.length === 2 && N.edges.every(e => e.level === 0)) drawJointMarks(ctx, N);
   for (const N of nodes) if (N.edges.length >= 3 && !N.ramp && N.edges.every(e => e.level === 0)) drawCornerLines(ctx, N);
+  for (const N of nodes) if (N.ramp) drawRampConnectorLines(ctx, N);
   for (const N of nodes) drawStopLines(ctx, N);
   if (View.showFlow) drawFlowOverlay(ctx, ground);
   drawVehicles(ctx, vG, 1);

@@ -111,7 +111,10 @@ function edgeProps(e) {
 }
 
 function edgeGeom(e) {
-  const A = e.A, B = e.B, c = e.c;
+  // Rampen beginnen/enden seitlich versetzt am Zusatzstreifen der Autobahn (offA/offB)
+  const A = e.offA || e.A, B = e.offB || e.B;
+  const sh = { x: (e.offA ? e.offA.dx : 0) + (e.offB ? e.offB.dx : 0), y: (e.offA ? e.offA.dy : 0) + (e.offB ? e.offB.dy : 0) };
+  const c = { x: e.c.x + sh.x, y: e.c.y + sh.y };
   const N = Math.max(16, Math.ceil((Math.hypot(c.x - A.x, c.y - A.y) + Math.hypot(B.x - c.x, B.y - c.y)) / 2));
   const du = new Float64Array(N + 1);
   let px = A.x, py = A.y;
@@ -191,7 +194,8 @@ function zoneB(e, u) {
 }
 function turnLen(e, f) {
   if (f ? e.weaveF : e.weaveB) return Math.max(20, e.len - e.trimA - e.trimB); // Verflechtungsstreifen
-  return (f ? e.decF : e.decB) ? DEC_LEN : TURN_LEN;
+  if (f ? e.decF : e.decB) return clamp(e.len - e.trimA - e.trimB - TAPER - 12, 30, DEC_LEN);
+  return TURN_LEN;
 }
 // Einfaedelungsstreifen am Anfang eines Links (vorwaerts: Ende A, rueckwaerts: Ende B)
 function accZF(e, u) { if (!e.zaF) return 0; return smooth01((e.trimA + e.accLenF + TAPER - u) / TAPER); }
@@ -255,9 +259,10 @@ function sameProfile(e1, e2, N) {
 function rampSetup(N) {
   for (const e of N.edges) { if (e.A === N) { e.accF = 0; e.decB = 0; } if (e.B === N) { e.accB = 0; e.decF = 0; } }
   N.ramp = null;
-  if (N.ring || N.edges.length !== 3) return;
+  const clearAll = () => { for (const e of N.edges) if ((e.A === N && e.offA) || (e.B === N && e.offB)) setRampOffset(e, N, null); };
+  if (N.ring || N.edges.length !== 3) { clearAll(); return; }
   const fast = N.edges.filter(isFast), other = N.edges.filter(e => !isFast(e));
-  if (fast.length !== 2 || other.length !== 1 || other[0].nB !== 0) return;
+  if (fast.length !== 2 || other.length !== 1 || other[0].nB !== 0) { clearAll(); return; }
   const r = other[0], on = r.B === N, rd = edgeDirAt(r, N);
   let best = null, bd = -2;
   for (const f of fast) {
@@ -266,25 +271,33 @@ function rampSetup(N) {
     const has = on ? (f.A === N ? f.nF : f.nB) : (f.B === N ? f.nF : f.nB);
     if (has > 0 && dot > bd) { bd = dot; best = f; }
   }
-  if (!best) return;
+  if (!best) { setRampOffset(r, N, null); return; }
   if (on) { if (best.A === N) best.accF = 1; else best.accB = 1; }
   else { if (best.B === N) best.decF = 1; else best.decB = 1; }
   N.ramp = { on, fast: best, r };
+  // Rampe setzt genau am Zusatzstreifen an (seitlich versetzt, parallel zur Fahrbahn)
+  const fd = edgeDirAt(best, N);
+  const t = on ? fd : { x: -fd.x, y: -fd.y };          // Fahrtrichtung der Fahrbahn am Knoten
+  const lanes = on ? (best.A === N ? best.nF : best.nB) : (best.B === N ? best.nF : best.nB);
+  const lat = best.median / 2 + lanes * LANE_W + LANE_W * 0.5;
+  setRampOffset(r, N, { dx: -t.y * lat, dy: t.x * lat });
+}
+
+function setRampOffset(r, N, d) {
+  const key = r.A === N ? 'offA' : 'offB';
+  const cur = r[key];
+  if (!d) { if (cur) { r[key] = null; edgeGeom(r); } return; }
+  const nv = { x: N.x + d.dx, y: N.y + d.dy, dx: d.dx, dy: d.dy };
+  if (cur && Math.abs(cur.x - nv.x) < 0.01 && Math.abs(cur.y - nv.y) < 0.01) return;
+  r[key] = nv;
+  edgeGeom(r);
 }
 
 function computeTrims(N) {
   if (N.ramp) {
-    const r = N.ramp.r, rd = edgeDirAt(r, N);
-    let sinPhi = 1, hwo = 0;
-    for (const e of N.edges) {
-      if (e === r) continue;
-      if (e.A === N) e.trimA = 0; else e.trimB = 0;
-      const d = edgeDirAt(e, N);
-      sinPhi = Math.min(sinPhi, Math.abs(rd.x * d.y - rd.y * d.x));
-      hwo = Math.max(hwo, e.hw + LANE_W);
-    }
-    const t = clamp((hwo + 0.5) / Math.max(sinPhi, 0.12) * 0.75, 5, 60);
-    if (r.A === N) r.trimA = t; else r.trimB = t;
+    const r = N.ramp.r, f = N.ramp.fast;
+    for (const e of N.edges) if (e !== r) { if (e.A === N) e.trimA = 0; else e.trimB = 0; }
+    if (r.A === N) r.trimA = 0; else r.trimB = 0;
     N.trim = 0;
     return;
   }
@@ -483,6 +496,11 @@ function buildNode(N) {
       const kind = Math.abs(turn) > 2.6 ? 'U' : turn > 0.5 ? 'R' : turn < -0.5 ? 'L' : 'S';
       return { o, turn, kind };
     }).sort((a, b) => b.turn - a.turn);
+    // Anschlussstelle: Abfahrt liegt immer rechts, die Autobahn geht geradeaus (unabhaengig vom Winkel)
+    if (N.ramp) {
+      for (const x of outs) x.kind = x.o.edge === N.ramp.r ? 'R' : 'S';
+      outs.sort((a, b) => (a.kind === 'R' ? 0 : 1) - (b.kind === 'R' ? 0 : 1));
+    }
     // mehrere "geradeaus" (z.B. flache Abfahrt): Hauptrichtung bleibt S, Rest links/rechts
     const sOuts = outs.filter(x => x.kind === 'S');
     if (sOuts.length > 1) {
@@ -853,6 +871,33 @@ function resolveSnap(sn) {
 }
 
 // Rampen muessen (in Fahrtrichtung) von rechts kommen bzw. nach rechts abgehen
+// Rampe an einer kreuzungsfreien Strasse: welche Fahrbahn, Auf- oder Abfahrt (aus der Lage, nicht der Zeichenrichtung)
+function fastSnapInfo(sn) {
+  if (!sn) return null;
+  if (sn.type === 'edge' && isFast(sn.edge)) return { e: sn.edge, u: sn.u };
+  if (sn.type === 'node' && sn.node && !sn.node.deleted) {
+    const e = sn.node.edges.find(isFast);
+    if (e) return { e, u: e.A === sn.node ? 0 : e.len };
+  }
+  return null;
+}
+function rampGeom(s0, s1) {
+  const f0 = fastSnapInfo(s0), f1 = fastSnapInfo(s1);
+  if (!!f0 === !!f1) return null;
+  const Q = f0 ? s0 : s1, P = f0 ? s1 : s0, fi = f0 || f1;
+  const pt = edgeSample(fi.e, fi.u, {});
+  const right = (P.x - pt.x) * -pt.ty + (P.y - pt.y) * pt.tx > 0;
+  const dir = right ? { x: pt.tx, y: pt.ty } : { x: -pt.tx, y: -pt.ty };
+  const along = (P.x - pt.x) * dir.x + (P.y - pt.y) * dir.y;
+  const off = along > 0;
+  return { Q, P, dir, along, off, swap: off ? Q !== s0 : Q !== s1, ok: right ? fi.e.nF > 0 : fi.e.nB > 0 };
+}
+// tangentialer Kontrollpunkt: Rampe verlaesst bzw. erreicht die Autobahn in Fahrtrichtung
+function rampCtrl(g) {
+  const k = clamp(Math.abs(g.along) * 0.6, 12, 220) * (g.off ? 1 : -1);
+  return { x: g.Q.x + g.dir.x * k, y: g.Q.y + g.dir.y * k };
+}
+
 function rampWrongSide(sn, isOn, other, c) {
   let e, u;
   if (sn.type === 'edge') { e = sn.edge; u = sn.u; }
@@ -872,6 +917,13 @@ function rampWrongSide(sn, isOn, other, c) {
 }
 
 function buildRoad(s0, ctrl, s1, spec, level) {
+  // Rampen: Richtung automatisch (Abfahrt fuehrt von der Autobahn weg, Auffahrt zu ihr hin)
+  const rg = spec.nB === 0 && !(spec.median > 0) ? rampGeom(s0, s1) : null;
+  if (rg) {
+    if (!rg.ok) return { ok: false, msg: 'Diese Fahrbahn fährt in die andere Richtung' };
+    if (!ctrl) ctrl = rampCtrl(rg);
+    if (rg.swap) { const t = s0; s0 = s1; s1 = t; }
+  }
   const p0 = { x: s0.x, y: s0.y }, p1 = { x: s1.x, y: s1.y };
   const c = ctrl ? { x: ctrl.x, y: ctrl.y } : { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
   const approxLen = Math.hypot(c.x - p0.x, c.y - p0.y) + Math.hypot(p1.x - c.x, p1.y - c.y);
@@ -884,8 +936,6 @@ function buildRoad(s0, ctrl, s1, spec, level) {
       if (!touchesFast(sn)) continue;
       if (spec.nB !== 0) return { ok: false, msg: 'Autobahn/Bundesstraße: nur Auf- und Abfahrten (Einbahnstraße) anschließen. Zum Kreuzen einfach drüberbauen – die Brücke entsteht automatisch.' };
       if (sn.type === 'node' && sn.node.edges.length >= 3) return { ok: false, msg: 'Hier ist schon eine Anschlussstelle – etwas weiter entfernt ansetzen' };
-      const wrong = rampWrongSide(sn, sn === s1, sn === s1 ? s0 : s1, c);
-      if (wrong) return { ok: false, msg: wrong };
     }
   }
   const crosses = [], overs = [];

@@ -283,6 +283,11 @@ function endTangent(sn, isStart) {
 }
 
 function autoCtrl(s0, s1) {
+  // Rampe an Autobahn/Bundesstrasse: tangential ein- bzw. ausfaedeln
+  if (UI.spec.nB === 0 && !(UI.spec.median > 0)) {
+    const g = rampGeom(s0, s1);
+    if (g && g.ok) return rampCtrl(g);
+  }
   const dx = s1.x - s0.x, dy = s1.y - s0.y, L = Math.hypot(dx, dy);
   if (L < 1) return mid(s0, s1);
   let t0 = endTangent(s0, true), t1 = endTangent(s1, false);
