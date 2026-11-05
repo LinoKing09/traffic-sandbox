@@ -230,6 +230,15 @@ function edgeDirAt(e, N) {
 function hwAt(e, N) { return e.A === N ? e.hwA : e.hwB; }
 function totalLanes(e) { return e.nF + e.nB; }
 
+// Spuren, die auf e1 zum Knoten fahren, laufen auf e2 weiter (und umgekehrt)?
+function sameProfile(e1, e2, N) {
+  const in1 = e1.B === N ? e1.nF : e1.nB, out1 = e1.B === N ? e1.nB : e1.nF;
+  const in2 = e2.B === N ? e2.nF : e2.nB, out2 = e2.B === N ? e2.nB : e2.nF;
+  if (in1 !== out2 || out1 !== in2 || e1.median !== e2.median || e1.ring !== e2.ring) return false;
+  const turns = (e) => e.B === N ? e.tlF + e.trF : e.tlB + e.trB;
+  return turns(e1) === 0 && turns(e2) === 0;
+}
+
 function computeTrims(N) {
   const deg = N.edges.length;
   const data = N.edges.map(e => ({ e, d: edgeDirAt(e, N), hw: hwAt(e, N) }));
@@ -250,7 +259,9 @@ function computeTrims(N) {
       if (deg >= 3 || N.ring) t += N.ring ? 1 : 2;
       if (deg === 2) {
         const o = data[0] === a ? data[1].e : data[0].e;
-        t = Math.max(t + 0.5, 1.5 + Math.abs(totalLanes(a.e) - totalLanes(o)) * 6);
+        // gleicher Querschnitt: nahtloser Uebergang ohne Kreuzungsflaeche
+        if (sameProfile(a.e, o, N)) t = t < 0.3 ? 0 : t * 0.6 + 0.4;
+        else t = Math.max(t + 0.5, 1.5 + Math.abs(totalLanes(a.e) - totalLanes(o)) * 6);
       }
     }
     if (a.e.A === N) a.e.trimA = t;

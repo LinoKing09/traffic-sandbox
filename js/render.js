@@ -94,17 +94,19 @@ function drawTowns(ctx, r, towns) {
 }
 
 // ---------- Strassen ----------
-function roadPath(ctx, e, i0, i1, ext) {
+function roadPath(ctx, e, i0, i1, ext, cap) {
   ext = ext || 0;
+  // cap: Enden minimal verlaengern, damit an Uebergaengen keine Naht sichtbar ist
+  const c = (i) => cap ? (i === 0 ? -cap : i === e.n ? cap : 0) : 0;
   ctx.beginPath();
   for (let i = i0; i <= i1; i++) {
-    const R = edgeRight(e, i * e.step) + ext;
-    const x = e.px[i] - e.ty[i] * R, y = e.py[i] + e.tx[i] * R;
+    const R = edgeRight(e, i * e.step) + ext, k = c(i);
+    const x = e.px[i] - e.ty[i] * R + e.tx[i] * k, y = e.py[i] + e.tx[i] * R + e.ty[i] * k;
     if (i === i0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   for (let i = i1; i >= i0; i--) {
-    const Lf = edgeLeft(e, i * e.step) + ext;
-    ctx.lineTo(e.px[i] + e.ty[i] * Lf, e.py[i] - e.tx[i] * Lf);
+    const Lf = edgeLeft(e, i * e.step) + ext, k = c(i);
+    ctx.lineTo(e.px[i] + e.ty[i] * Lf + e.tx[i] * k, e.py[i] - e.tx[i] * Lf + e.ty[i] * k);
   }
   ctx.closePath();
 }
@@ -168,8 +170,35 @@ function drawEdgeSurface(ctx, e, style) {
     return;
   }
   ctx.fillStyle = style;
-  roadPath(ctx, e, 0, e.n, 0);
+  roadPath(ctx, e, 0, e.n, 0, 0.6);
   ctx.fill();
+}
+
+// Markierungen ueber einen Knick zwischen zwei Strassen hinweg weiterfuehren
+function drawJointMarks(ctx, N) {
+  if (View.scale < 0.55 || N.edges.length !== 2) return;
+  const [a, b] = N.edges;
+  const ta = a.A === N ? a.trimA : a.trimB, tb = b.A === N ? b.trimA : b.trimB;
+  if (ta < 0.05 && tb < 0.05) return;
+  const pts = (e) => {
+    const u = e.A === N ? e.trimA : e.len - e.trimB;
+    const p = edgeSample(e, u, {});
+    const at = (lat) => ({ x: p.x - p.ty * lat, y: p.y + p.tx * lat });
+    const sideR = at(edgeRight(e, u) - 0.35), sideL = at(-(edgeLeft(e, u) - 0.35));
+    return { c: at(edgeCenter(e, u)), sides: [sideR, sideL], two: e.nB > 0 };
+  };
+  const A = pts(a), B = pts(b);
+  ctx.strokeStyle = COL.mark; ctx.lineWidth = 0.15;
+  const curve = (p, q) => { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.quadraticCurveTo(N.x + (p.x + q.x - 2 * N.x) * 0.25, N.y + (p.y + q.y - 2 * N.y) * 0.25, q.x, q.y); ctx.stroke(); };
+  if (A.two && B.two) { ctx.setLineDash(a.nF + a.nB > 2 ? [] : [4, 5]); curve(A.c, B.c); }
+  if (View.scale > 1) {
+    ctx.setLineDash([]);
+    for (const p of A.sides) {
+      const q = B.sides.reduce((m, x) => (Math.hypot(x.x - p.x, x.y - p.y) < Math.hypot(m.x - p.x, m.y - p.y) ? x : m));
+      curve(p, q);
+    }
+  }
+  ctx.setLineDash([]);
 }
 
 // Linie in Vorwaertskoordinaten zwischen zwei Spuren eines Links
@@ -347,14 +376,18 @@ function drawLight(ctx, x, y, st, hx, hy) {
 function drawEdgeSigns(ctx, e) {
   const s = View.scale;
   if (s < 0.9 || e.ring) return;
+  // Fortsetzung derselben Strasse an einem einfachen Uebergang?
+  const cont = (N, f) => { if (N.edges.length !== 2) return false; const o = N.edges[0] === e ? N.edges[1] : N.edges[0]; return !o.ring && f(o); };
   // Einbahnstrasse (Zeichen 220) und Verbot der Einfahrt (Zeichen 267)
-  if (e.nB === 0 && e.len > 30) {
+  if (e.nB === 0 && e.len > 30 && !cont(e.A, o => o.nB === 0)) {
     const ln = e.linkF.lanes[0];
     const p = lanePos(ln, ln.s0 + 4, LANE_W * 0.5 + 1.4, {});
     ctx.save(); ctx.translate(p.x, p.y); ctx.transform(p.hx, p.hy, -p.hy, p.hx, 0, 0);
     ctx.fillStyle = '#1f5fbf'; ctx.fillRect(-1.3, -0.5, 2.6, 1);
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(-1, -0.15); ctx.lineTo(0.5, -0.15); ctx.lineTo(0.5, -0.35); ctx.lineTo(1.05, 0); ctx.lineTo(0.5, 0.35); ctx.lineTo(0.5, 0.15); ctx.lineTo(-1, 0.15); ctx.fill();
     ctx.restore();
+  }
+  if (e.nB === 0 && e.len > 30 && e.B.edges.length >= 3) {
     const u = e.len - e.trimB - 3;
     const q = edgeSample(e, u, {});
     const l = -(edgeLeft(e, u) + 1.4);
@@ -366,6 +399,8 @@ function drawEdgeSigns(ctx, e) {
   if (s < 1.6) return;
   for (const L of [e.linkF, e.linkB]) {
     if (!L || L.len < 40) continue;
+    // Tempolimit nur zeigen, wo es sich aendert (nicht an einfachen Strassenuebergaengen)
+    if (cont(L.from, o => o.kmh === e.kmh)) continue;
     const ln = L.lanes[0];
     const p = lanePos(ln, ln.s0 + (e.nB === 0 ? 9 : 6), LANE_W * 0.5 + 1.4, {});
     ctx.beginPath(); ctx.arc(p.x, p.y, 1.05, 0, TAU);
@@ -510,7 +545,7 @@ function render() {
   for (const e of ground) drawEdgeSurface(ctx, e, COL.asphalt);
   if (s >= 0.12) {
     ctx.fillStyle = COL.asphalt;
-    for (const N of nodes) if (N.edges.length >= 2 && N.edges.some(e => e.level === 0) && nodePoly(ctx, N)) ctx.fill();
+    for (const N of nodes) if (N.edges.length >= 2 && N.edges.some(e => e.level === 0) && N.trim > 0.05 && nodePoly(ctx, N)) ctx.fill();
   }
   const ringIds = new Set();
   for (const N of nodes) if (N.ring) ringIds.add(N.ring);
@@ -530,12 +565,13 @@ function render() {
     }
   }
   for (const e of ground) drawMarkings(ctx, e);
+  for (const N of nodes) if (N.edges.length === 2 && N.edges.every(e => e.level === 0)) drawJointMarks(ctx, N);
   for (const N of nodes) drawStopLines(ctx, N);
   if (View.showFlow) drawFlowOverlay(ctx, ground);
   drawVehicles(ctx, vG, 1);
   for (const e of bridges) {
     drawBridgeDeck(ctx, e, 0, e.n);
-    ctx.fillStyle = COL.asphalt; roadPath(ctx, e, 0, e.n, 0); ctx.fill();
+    ctx.fillStyle = COL.asphalt; roadPath(ctx, e, 0, e.n, 0, 0.6); ctx.fill();
     drawMarkings(ctx, e);
   }
   if (View.showFlow) drawFlowOverlay(ctx, bridges);

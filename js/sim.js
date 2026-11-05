@@ -503,7 +503,9 @@ function mayEnter(v, m, dist, yieldAll) {
         const c = m.conf.get(mu);
         if (!c) continue;
         if (!yieldAll && !hasPrio(N, u, mu, v, m)) continue;
-        if (u.v < 0.5 && u.waitT > 2 && v.waitT > u.waitT + 2 && !yieldAll) continue;
+        // gegenseitiges Warten (z.B. rechts vor links von allen Seiten) aufloesen: eindeutige Reihenfolge
+        if (!yieldAll && u.v < 0.5 && u.waitT > 2 && v.waitT > 2 &&
+          (v.waitT > u.waitT + 1 || (Math.abs(v.waitT - u.waitT) <= 1 && v.id < u.id))) continue;
         if (st === 'Y' && du > u.v * u.v / 7 + 1.5) continue;
         const eta = tReach(u, du + c.sOther, Math.min(uV0(u), mu.vmax + 3));
         if (eta < tReach(v, dist + c.sSelf + v.len + 1, vmV) + margin) return false;
