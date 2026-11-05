@@ -137,8 +137,7 @@ const Terrain = {
           let root = NAME_A[Math.floor(r() * NAME_A.length)] + NAME_B[Math.floor(r() * NAME_B.length)];
           if (pre && !pre.endsWith(' ')) root = root.charAt(0).toLowerCase() + root.slice(1);
           const name = pre + root;
-          town = { id: key, x, y, pop, name: name.charAt(0).toUpperCase() + name.slice(1), node: null, houses: null,
-            queue: [], dests: [], sumW: 0, sent: 0, arrived: 0 };
+          town = { id: key, x, y, pop, name: name.charAt(0).toUpperCase() + name.slice(1), houses: null, nAtt: 0 };
           break;
         }
       }
@@ -156,25 +155,28 @@ const Terrain = {
     }
     return out;
   },
-  townRadius(t) { return 30 + Math.sqrt(t.pop) * 0.85; },
+  townRadius(t) { return 40 + Math.sqrt(t.pop) * 0.75; },
   townHouses(t) {
     if (t.houses) return t.houses;
     const r = rng(hashInt(Math.round(t.x), Math.round(t.y), this.seed + 21));
-    const n = Math.round(clamp(t.pop / 110, 8, 190));
+    const n = Math.round(clamp(t.pop / 55, 12, 320));
     const R = this.townRadius(t);
     const hs = [];
-    for (let i = 0; i < n * 2 && hs.length < n; i++) {
+    for (let i = 0; i < n * 3 && hs.length < n; i++) {
       const a = r() * TAU, d = Math.pow(r(), 0.75) * R;
       const x = t.x + Math.cos(a) * d, y = t.y + Math.sin(a) * d;
       if (Math.hypot(x - t.x, y - t.y) < 14) continue;
+      if (hs.some(o => Math.abs(o.x - x) < 11 && Math.abs(o.y - y) < 11)) continue;
       const inf = this.info(x, y);
       if (inf.water || inf.rock) continue;
-      const big = d < R * 0.35 && t.pop > 4000;
+      const big = d < R * 0.35 && t.pop > 2500 && r() < 0.5;
       const w = big ? 12 + r() * 14 : 7 + r() * 6, h = big ? 10 + r() * 12 : 6 + r() * 5;
-      const roof = ['#b5543c', '#a3473a', '#8f5a44', '#c06a4a', '#7d6a5d', '#9a9a9a'][Math.floor(r() * 6)];
-      hs.push({ x, y, w, h, a: r() * Math.PI, roof });
+      const roof = big ? ['#8a8f96', '#9aa0a6', '#7b8794'][Math.floor(r() * 3)] : ['#b5543c', '#a3473a', '#8f5a44', '#c06a4a', '#7d6a5d', '#9a9a9a'][Math.floor(r() * 6)];
+      hs.push({ x, y, w, h, a: r() * Math.PI, roof, kind: big ? 'shop' : 'home', weight: big ? 6 : 1, town: t, att: null, gone: false });
     }
     t.houses = hs;
+    t.nAtt = 0;
+    if (typeof attachTown === 'function' && Net.edges.size) { attachTown(t); if (typeof Sim !== 'undefined') Sim.housesDirty = true; }
     return hs;
   },
 };

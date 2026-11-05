@@ -2,120 +2,51 @@
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#18212e">
   <title>Verkehrs-Sandbox</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <canvas id="c"></canvas>
 
-  <header id="topbar">
-    <div class="brand">🛣️ Verkehrs-Sandbox</div>
-    <div class="group" id="timeCtl">
-      <button data-speed="0" title="Pause (Leertaste)">⏸</button>
-      <button data-speed="1">1×</button>
-      <button data-speed="2">2×</button>
-      <button data-speed="4">4×</button>
-      <button data-speed="8">8×</button>
-    </div>
-    <div class="group">
-      <label for="demand">Verkehr</label>
-      <input type="range" id="demand" min="0" max="3" step="0.05" value="1">
-      <span id="demandVal">100 %</span>
-    </div>
-    <div class="group">
-      <label for="errSel">Fahrfehler</label>
-      <select id="errSel">
-        <option value="0">aus</option>
-        <option value="0.5">selten</option>
-        <option value="1" selected>normal</option>
-        <option value="2.5">häufig</option>
-      </select>
-    </div>
-    <div class="group">
-      <button id="flowBtn" title="Verkehrsfluss einfärben (F)">🌈 Fluss</button>
-      <button id="accBtn" class="on" title="Unfallorte anzeigen">💥 Unfälle</button>
-    </div>
-    <div class="group right">
-      <button id="saveBtn" title="Speichern">💾</button>
-      <button id="loadBtn" title="Laden">📂</button>
-      <button id="newBtn" title="Neue Welt">🌍</button>
-      <button id="helpBtn" title="Hilfe">❓</button>
-    </div>
+  <header id="top">
+    <button id="statChip" class="chip" aria-label="Verkehrslage anzeigen">
+      <span id="grade">–</span><span id="chipVeh">🚗 0</span><span id="chipFlow">🌊 –</span><span id="chipAcc">💥 0</span>
+    </button>
+    <div class="grow"></div>
+    <button id="playBtn" class="ib" aria-label="Pause / Weiter">⏸</button>
+    <button id="speedBtn" class="ib" aria-label="Geschwindigkeit">1×</button>
+    <button id="flowBtn" class="ib" aria-label="Fluss-Ansicht">🌈</button>
+    <button id="menuBtn" class="ib" aria-label="Menü">☰</button>
   </header>
 
-  <aside id="leftbar">
-    <div id="tools"></div>
-    <button id="curveBtn" class="tool small" title="Kurvenmodus (C)"><span class="ic">〰️</span><span class="lb">Kurve</span><kbd>C</kbd></button>
-  </aside>
+  <div id="ctx"></div>
+  <div id="floatBtns"></div>
+  <nav id="dock" aria-label="Werkzeuge"></nav>
 
-  <section id="roadpanel">
-    <div class="ptitle">Straßentyp</div>
-    <div id="presets"></div>
-    <div class="custom">
-      <div class="crow"><span>Spuren →</span><button id="fMinus">−</button><b id="fVal">1</b><button id="fPlus">+</button></div>
-      <div class="crow"><span>Spuren ←</span><button id="bMinus">−</button><b id="bVal">1</b><button id="bPlus">+</button></div>
-      <div class="crow"><span>Tempo</span>
-        <select id="speedSel">
-          <option value="30">30 km/h</option><option value="50">50 km/h</option><option value="60">60 km/h</option>
-          <option value="70">70 km/h</option><option value="80">80 km/h</option><option value="100">100 km/h</option>
-          <option value="120">120 km/h</option><option value="130">130 km/h</option>
-        </select>
-      </div>
-      <label class="crow"><input type="checkbox" id="medianChk"> Mittelstreifen</label>
-    </div>
+  <section id="sheet" class="hidden" aria-live="polite">
+    <div class="sheetHead"><b id="sheetTitle"></b><button id="sheetClose" aria-label="Schließen">✕</button></div>
+    <div id="sheetBody"></div>
   </section>
 
-  <section id="stats">
-    <button id="panelToggle" title="Panel ein-/ausklappen">☰</button>
-    <div class="gradeBox">
-      <div id="grade">–</div>
-      <div><div id="gradeTxt">Sammle Daten …</div><div id="sClock" class="muted"></div></div>
-    </div>
-    <div id="statRows"></div>
-    <canvas id="chart"></canvas>
-    <div class="legend"><span style="color:#5dade2">● Fahrzeuge</span><span style="color:#2ecc71">● Fluss</span><span style="color:#e67e22">● Stau</span><span style="color:#e74c3c">▮ Unfälle</span></div>
-    <div class="ptitle">Brennpunkte</div>
-    <div id="hotspots"></div>
-    <div id="info" class="hidden"></div>
-  </section>
-
-  <div id="hint"></div>
   <div id="toast"></div>
-  <div id="popup" class="hidden"></div>
 
   <div id="help" class="hidden">
     <div class="helpBox">
       <h2>🛣️ Verkehrs-Sandbox</h2>
-      <p>Eine unendliche, zufällig erzeugte Landschaft mit Orten. <b>Verbinde die Orte mit Straßen</b> – sobald zwei Orte verbunden sind, fahren Autos und LKW zwischen ihnen. Die Simulation zeigt dir, ob dein Straßennetz flüssig läuft oder ob Staus und Unfälle entstehen.</p>
-      <div class="cols">
-        <div>
-          <h3>Bauen</h3>
-          <ul>
-            <li><b>1 Straße</b>: klicken, klicken … (Kette). Rechtsklick/Esc beendet.</li>
-            <li><b>C</b>: Kurvenmodus (2. Klick = Kurvenpunkt). <b>Shift</b>: Winkel einrasten.</li>
-            <li>Straßen, die sich kreuzen, bilden automatisch eine <b>Kreuzung</b>. Über Wasser entstehen automatisch Brücken, durch Felsen Tunnel.</li>
-            <li><b>2 Brücke / 3 Tunnel</b>: kreuzungsfreie Über-/Unterführungen (z.B. für Autobahnkreuze).</li>
-            <li><b>4 Kreuzung</b>: Vorfahrt, Stoppschilder, Allseitig-Stopp oder adaptive Ampel.</li>
-            <li><b>5 Kreisverkehr</b>, <b>6 Abbiegespur</b>, <b>7 Umbauen</b> (Typ übernehmen, Einbahn umdrehen), <b>8 Abriss</b>, <b>9 Info</b>.</li>
-          </ul>
-        </div>
-        <div>
-          <h3>Steuerung</h3>
-          <ul>
-            <li>Ziehen = Karte verschieben, Mausrad = Zoom, WASD/Pfeile.</li>
-            <li>Leertaste = Pause, 1×–8× Zeitraffer.</li>
-            <li><b>F</b>: Fluss-Ansicht (grün = frei, rot = Stau).</li>
-          </ul>
-          <h3>Tipps</h3>
-          <ul>
-            <li>Schnelle Kreuzungen ohne Ampel sind unfallträchtig.</li>
-            <li>Linksabbieger ohne Abbiegespur blockieren den Verkehr.</li>
-            <li>Kreisverkehre sind sicher und flüssig bei mittlerem Verkehr.</li>
-            <li>Spurenzahl &amp; Tempo bestimmen die Kapazität (≈1800 Fz/h pro Spur).</li>
-          </ul>
-        </div>
-      </div>
+      <p>Baue Straßen durch eine endlose Landschaft und probiere Verkehrsführungen aus: Abbiegespuren, Richtungspfeile, Vorfahrt, Stoppschilder, Ampeln mit Grünpfeil und Kreisverkehre. Häuser neben deinen Straßen werden automatisch angebunden – von dort fahren die Autos los.</p>
+      <ul>
+        <li><b>🛣️ Straße:</b> mit dem Finger (oder der Maus) ziehen. Oder: antippen, antippen … und <i>Fertig</i>.</li>
+        <li><b>Karte:</b> mit zwei Fingern verschieben und zoomen (Maus: Rechtsklick ziehen, Mausrad).</li>
+        <li><b>🚦 Kreuzung:</b> Rechts vor links, Vorfahrtstraße, Stoppschild, Ampel, Kreisverkehr.</li>
+        <li><b>↱ Spuren:</b> kurz vor einer Kreuzung auf die Straße tippen – Links-/Rechtsabbiegespuren und Pfeile einstellen.</li>
+        <li><b>🌈</b> färbt Straßen nach Verkehrsfluss: grün frei, rot Stau.</li>
+      </ul>
+      <p class="muted small">Tipp: Häuser direkt an der Hauptstraße bremsen den Verkehr. Leite den Verkehr über Wohnstraßen auf wenige, gut geregelte Kreuzungen.</p>
       <button id="helpClose">Los geht's!</button>
     </div>
   </div>

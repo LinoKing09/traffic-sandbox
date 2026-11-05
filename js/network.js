@@ -1,30 +1,32 @@
 'use strict';
 // ---------- Strassennetz: Knoten, Kanten, Spuren, Abbiegebeziehungen ----------
-const LANE_W = 3.5, TURN_LEN = 36, TAPER = 12;
+const LANE_W = 3.5, TURN_LEN = 40, TAPER = 12;
+const ARR_R = 1, ARR_S = 2, ARR_L = 4;
 
 const ROAD_PRESETS = {
+  wohn: { name: 'Wohnstraße', nF: 1, nB: 1, speed: 30, median: 0 },
   stadt: { name: 'Stadtstraße', nF: 1, nB: 1, speed: 50, median: 0 },
-  land: { name: 'Landstraße', nF: 1, nB: 1, speed: 80, median: 0 },
-  haupt: { name: 'Hauptstraße', nF: 2, nB: 2, speed: 60, median: 0 },
-  schnell: { name: 'Schnellstraße', nF: 2, nB: 2, speed: 100, median: 2.5 },
+  haupt: { name: 'Hauptstraße', nF: 2, nB: 2, speed: 50, median: 0 },
+  land: { name: 'Landstraße', nF: 1, nB: 1, speed: 100, median: 0 },
+  bund: { name: 'Bundesstraße', nF: 2, nB: 2, speed: 100, median: 2.5 },
   autobahn: { name: 'Autobahn', nF: 3, nB: 3, speed: 130, median: 4 },
-  einbahn: { name: 'Einbahnstraße', nF: 2, nB: 0, speed: 50, median: 0 },
-  rampe: { name: 'Auffahrt (einspurig)', nF: 1, nB: 0, speed: 70, median: 0 },
+  einbahn: { name: 'Einbahnstraße', nF: 1, nB: 0, speed: 30, median: 0 },
+  rampe: { name: 'Auf-/Abfahrt', nF: 1, nB: 0, speed: 80, median: 0 },
 };
 
 const Net = {
   nodes: new Map(), edges: new Map(), links: [], lanes: [], nextId: 1, rev: 0,
-  dirty: new Set(), transfers: [], rings: new Map(), moveId: 1,
+  dirty: new Set(), transfers: [], rings: new Map(), moveId: 1, boxes: [],
 };
 
 function netReset() {
   Net.nodes.clear(); Net.edges.clear(); Net.links = []; Net.lanes = []; Net.nextId = 1; Net.rev++;
-  Net.dirty.clear(); Net.transfers = []; Net.rings.clear();
+  Net.dirty.clear(); Net.transfers = []; Net.rings.clear(); Net.boxes = [];
 }
 
 function addNode(x, y, props) {
   const n = {
-    id: Net.nextId++, x, y, edges: [], ctl: 'auto', town: null, ring: 0,
+    id: Net.nextId++, x, y, edges: [], ctl: 'default', gruen: false, ring: 0,
     occ: new Set(), inLinks: [], outLinks: [], moves: [], trans: new Map(), transOut: new Map(),
     rank: new Map(), pen: new Map(), phases: [], light: null, majorPick: 0, major: null,
     accidents: 0, waitAvg: 0, thr: 0, thrCnt: 0, trim: 0,
@@ -43,13 +45,21 @@ function addEdge(A, B, c, spec) {
   const e = {
     id: Net.nextId++, A, B, c: { x: c.x, y: c.y }, nF: spec.nF, nB: spec.nB, kmh: spec.speed,
     median: spec.nB > 0 ? (spec.median || 0) : 0, level: spec.level || 0, ring: spec.ring || 0,
-    turnF: false, turnB: false, turnOkF: false, turnOkB: false, accidents: 0,
+    tlF: 0, trF: 0, tlB: 0, trB: 0, arrF: null, arrB: null, okF: false, okB: false,
+    zlF: 0, zrF: 0, zlB: 0, zrB: 0, accidents: 0,
     linkF: null, linkB: null, trimA: 0, trimB: 0, geomDirty: true,
   };
   Net.edges.set(e.id, e);
   A.edges.push(e); B.edges.push(e);
   Net.dirty.add(A); Net.dirty.add(B);
+  Net.boxes.push(boxOf([A, B, c]));
   return e;
+}
+
+function boxOf(pts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  return { x0, y0, x1, y1 };
 }
 
 function killLink(L) {
@@ -58,16 +68,21 @@ function killLink(L) {
   L.dead = true;
 }
 
-function removeEdge(e) {
-  if (!Net.edges.has(e.id)) return;
+function detachEdge(e) {
   Net.edges.delete(e.id);
   for (const N of [e.A, e.B]) {
     const i = N.edges.indexOf(e);
     if (i >= 0) N.edges.splice(i, 1);
     Net.dirty.add(N);
   }
+  if (e.bb) Net.boxes.push(e.bb);
+}
+
+function removeEdge(e) {
+  if (!Net.edges.has(e.id)) return;
+  detachEdge(e);
   killLink(e.linkF); killLink(e.linkB);
-  for (const N of [e.A, e.B]) if (N.edges.length === 0 && !N.town) removeNodeOnly(N);
+  for (const N of [e.A, e.B]) if (N.edges.length === 0) removeNodeOnly(N);
 }
 
 function removeNodeOnly(N) {
@@ -78,7 +93,7 @@ function removeNodeOnly(N) {
 
 function removeNode(N) {
   for (const e of [...N.edges]) removeEdge(e);
-  if (!N.town) removeNodeOnly(N);
+  removeNodeOnly(N);
 }
 
 // ---------- Geometrie ----------
@@ -87,6 +102,9 @@ function edgeProps(e) {
   const W = LANE_W, m = e.median / 2;
   e.c0 = e.nB === 0 ? -e.nF * W / 2 : 0;
   e.hw = Math.max(e.c0 + m + e.nF * W, -e.c0 + m + e.nB * W);
+  // halbe Breite an den Enden inkl. Abbiegespuren
+  e.hwA = Math.max(e.c0 + m + (e.nF + e.tlB) * W, -e.c0 + m + (e.nB + e.trB) * W);
+  e.hwB = Math.max(e.c0 + m + (e.nF + e.trF) * W, -e.c0 + m + (e.nB + e.tlF) * W);
 }
 
 function edgeGeom(e) {
@@ -106,14 +124,16 @@ function edgeGeom(e) {
   e.px = new Float32Array(n + 1); e.py = new Float32Array(n + 1);
   e.tx = new Float32Array(n + 1); e.ty = new Float32Array(n + 1);
   e.wat = new Uint8Array(n + 1); e.rock = new Uint8Array(n + 1);
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (let i = 0; i <= n; i++) {
     const t = edgeTAtU(e, i * e.step);
     const p = qPoint(A, c, B, t), tg = qTan(A, c, B, t);
     e.px[i] = p.x; e.py[i] = p.y; e.tx[i] = tg.x; e.ty[i] = tg.y;
     const inf = Terrain.info(p.x, p.y);
     e.wat[i] = inf.water ? 1 : 0; e.rock[i] = inf.rock ? 1 : 0;
-    x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+  }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i <= n; i++) {
+    x0 = Math.min(x0, e.px[i]); y0 = Math.min(y0, e.py[i]); x1 = Math.max(x1, e.px[i]); y1 = Math.max(y1, e.py[i]);
   }
   e.bb = { x0, y0, x1, y1 };
   let maxK = 0;
@@ -122,7 +142,6 @@ function edgeGeom(e) {
     maxK = Math.max(maxK, d / (2 * e.step));
   }
   e.curveV = maxK > 1e-4 ? Math.max(4, Math.sqrt(3.2 / maxK)) : 99;
-  // Anteil Bruecke/Tunnel (nur fuer Statistik/Anzeige)
   e.geomDirty = false;
 }
 
@@ -150,40 +169,46 @@ function edgeSample(e, u, out) {
   const r = f - i;
   out.x = e.px[i] + (e.px[i + 1] - e.px[i]) * r;
   out.y = e.py[i] + (e.py[i + 1] - e.py[i]) * r;
-  let tx = e.tx[i] + (e.tx[i + 1] - e.tx[i]) * r, ty = e.ty[i] + (e.ty[i + 1] - e.ty[i]) * r;
+  const tx = e.tx[i] + (e.tx[i + 1] - e.tx[i]) * r, ty = e.ty[i] + (e.ty[i + 1] - e.ty[i]) * r;
   const l = Math.hypot(tx, ty) || 1;
   out.tx = tx / l; out.ty = ty / l;
   return out;
 }
 
+// Aufweitungszone vor dem Ende B (Vorwaertsrichtung) bzw. Ende A (Rueckrichtung)
 function zoneF(e, u) {
-  if (!e.turnOkF) return 0;
+  if (!e.okF) return 0;
   const zs = e.len - e.trimB - TURN_LEN;
   return smooth01((u - (zs - TAPER)) / TAPER);
 }
 function zoneB(e, u) {
-  if (!e.turnOkB) return 0;
+  if (!e.okB) return 0;
   const ze = e.trimA + TURN_LEN;
   return smooth01((ze + TAPER - u) / TAPER);
 }
 
-// Seitlicher Versatz (positiv = rechts in Fahrtrichtung des Links)
-function edgeLat(e, dir, idx, turn, u) {
+// Seitlicher Versatz einer Spur (positiv = rechts in Fahrtrichtung des Links)
+function edgeLat(e, dir, ln, u) {
   const W = LANE_W, c = e.c0, m = e.median / 2;
   const fz = zoneF(e, u), bz = zoneB(e, u);
   if (dir > 0) {
-    if (turn) return c + m + 0.5 * W - W * fz;
-    return c + m + (e.nF - idx - 0.5) * W + bz * W;
+    if (ln.kind === 'L') return c + m + 0.5 * W - W * fz * (ln.j + 1);
+    const base = c + m + bz * e.zlB * W;
+    if (ln.kind === 'R') return base + (e.nF - 0.5) * W + W * fz * (ln.j + 1);
+    return base + (e.nF - ln.idx - 0.5) * W;
   }
-  if (turn) return -c + m + 0.5 * W - W * bz;
-  return -c + m + (e.nB - idx - 0.5) * W + fz * W;
+  if (ln.kind === 'L') return -c + m + 0.5 * W - W * bz * (ln.j + 1);
+  const base = -c + m + fz * e.zlF * W;
+  if (ln.kind === 'R') return base + (e.nB - 0.5) * W + W * bz * (ln.j + 1);
+  return base + (e.nB - ln.idx - 0.5) * W;
 }
-function edgeRight(e, u) { return e.c0 + e.median / 2 + e.nF * LANE_W + zoneB(e, u) * LANE_W; }
-function edgeLeft(e, u) { return -e.c0 + e.median / 2 + e.nB * LANE_W + zoneF(e, u) * LANE_W; }
+function edgeRight(e, u) { return e.c0 + e.median / 2 + e.nF * LANE_W + (zoneB(e, u) * e.zlB + zoneF(e, u) * e.zrF) * LANE_W; }
+function edgeLeft(e, u) { return -e.c0 + e.median / 2 + e.nB * LANE_W + (zoneF(e, u) * e.zlF + zoneB(e, u) * e.zrB) * LANE_W; }
+function edgeCenter(e, u) { return e.c0 + (zoneB(e, u) * e.zlB - zoneF(e, u) * e.zlF) * LANE_W; }
 
 function laneLat(lane, s) {
   const L = lane.link, e = L.edge;
-  return edgeLat(e, L.dir, lane.idx, lane.turn, L.dir > 0 ? s : e.len - s);
+  return edgeLat(e, L.dir, lane, L.dir > 0 ? s : e.len - s);
 }
 
 const _lp = { x: 0, y: 0, hx: 1, hy: 0 };
@@ -193,21 +218,21 @@ function lanePos(lane, s, off, out) {
   const u = L.dir > 0 ? s : e.len - s;
   const p = edgeSample(e, u);
   const hx = L.dir > 0 ? p.tx : -p.tx, hy = L.dir > 0 ? p.ty : -p.ty;
-  const lat = edgeLat(e, L.dir, lane.idx, lane.turn, u) + (off || 0);
+  const lat = edgeLat(e, L.dir, lane, u) + (off || 0);
   out.x = p.x - hy * lat; out.y = p.y + hx * lat; out.hx = hx; out.hy = hy;
   return out;
 }
 
-// Richtung der Kante vom Knoten weg
 function edgeDirAt(e, N) {
   if (e.A === N) return { x: e.tx[0], y: e.ty[0] };
   return { x: -e.tx[e.n], y: -e.ty[e.n] };
 }
+function hwAt(e, N) { return e.A === N ? e.hwA : e.hwB; }
 function totalLanes(e) { return e.nF + e.nB; }
 
 function computeTrims(N) {
   const deg = N.edges.length;
-  const data = N.edges.map(e => ({ e, d: edgeDirAt(e, N) }));
+  const data = N.edges.map(e => ({ e, d: edgeDirAt(e, N), hw: hwAt(e, N) }));
   let maxT = 0;
   for (const a of data) {
     let t = 0;
@@ -219,7 +244,7 @@ function computeTrims(N) {
         let v;
         if (phi < 0.3) v = 30;
         else if (phi > 2.85) v = 0;
-        else v = (b.e.hw + a.e.hw * Math.cos(phi)) / Math.sin(phi);
+        else v = (b.hw + a.hw * Math.cos(phi)) / Math.sin(phi);
         t = Math.max(t, clamp(v, 0, 30));
       }
       if (deg >= 3 || N.ring) t += N.ring ? 1 : 2;
@@ -243,43 +268,47 @@ function fixTrims(e) {
   }
 }
 
-function newLane(L, idx, turn) {
-  const ln = { link: L, idx, turn, s0: 0, s1: 0, vehicles: [], moves: [], alive: true, lastOut: null };
-  return ln;
+function newLane(L, kind, idx, j) {
+  return { link: L, kind, idx, j, slot: 0, s0: 0, s1: 0, vehicles: [], moves: [], alive: true, lastOut: null, arrowMask: 0 };
+}
+
+function resizeLanes(arr, want, make, fallback) {
+  while (arr.length > want) {
+    const ln = arr.pop();
+    ln.alive = false;
+    const tgt = fallback();
+    for (const v of ln.vehicles) { v.lane = tgt; tgt.vehicles.push(v); v.lcOff = 0; v.committed = null; }
+    ln.vehicles = [];
+  }
+  while (arr.length < want) arr.push(make(arr.length));
 }
 
 function buildLinks(e) {
   for (const dir of [1, -1]) {
     const n = dir > 0 ? e.nF : e.nB;
     const key = dir > 0 ? 'linkF' : 'linkB';
-    if (n === 0) { if (e[key]) killLink(e[key]); e[key] = null; continue; }
+    if (n === 0) {
+      if (e[key]) killLink(e[key]);
+      e[key] = null;
+      if (dir > 0) { e.okF = false; e.zlF = e.zrF = 0; } else { e.okB = false; e.zlB = e.zrB = 0; }
+      continue;
+    }
     let L = e[key];
-    if (!L || L.dead) L = e[key] = { edge: e, dir, lanes: [], turnLane: null, avgV: e.speed, flow: 0, flowCnt: 0, id: -1, vsum: 0, vcnt: 0 };
+    if (!L || L.dead) L = e[key] = { edge: e, dir, lanes: [], tl: [], tr: [], avgV: e.speed, flow: 0, flowCnt: 0, id: -1, vsum: 0, vcnt: 0 };
     L.from = dir > 0 ? e.A : e.B; L.to = dir > 0 ? e.B : e.A;
     L.speed = e.speed; L.n = n;
     const s0 = dir > 0 ? e.trimA : e.trimB, s1 = e.len - (dir > 0 ? e.trimB : e.trimA);
-    if (L.lanes.length !== n) {
-      const old = L.lanes;
-      L.lanes = [];
-      for (let i = 0; i < n; i++) L.lanes.push(i < old.length ? old[i] : newLane(L, i, false));
-      for (let i = n; i < old.length; i++) {
-        old[i].alive = false;
-        const tgt = L.lanes[n - 1];
-        for (const v of old[i].vehicles) { v.lane = tgt; tgt.vehicles.push(v); v.lcOff = 0; }
-        old[i].vehicles = [];
-      }
-    }
+    resizeLanes(L.lanes, n, i => newLane(L, 'N', i, 0), () => L.lanes[L.lanes.length - 1]);
     for (const ln of L.lanes) { ln.s0 = s0; ln.s1 = s1; }
-    const want = (dir > 0 ? e.turnF : e.turnB) && (s1 - s0) > TURN_LEN + TAPER + 8 && n >= 1;
-    if (dir > 0) e.turnOkF = want; else e.turnOkB = want;
-    if (want && !L.turnLane) L.turnLane = newLane(L, n, true);
-    else if (!want && L.turnLane) {
-      const tgt = L.lanes[n - 1];
-      for (const v of L.turnLane.vehicles) { v.lane = tgt; tgt.vehicles.push(v); }
-      L.turnLane.vehicles = []; L.turnLane.alive = false; L.turnLane = null;
-    }
-    if (L.turnLane) { L.turnLane.idx = n; L.turnLane.s0 = s1 - TURN_LEN; L.turnLane.s1 = s1; }
-    L.allLanes = L.turnLane ? L.lanes.concat([L.turnLane]) : L.lanes.slice();
+    const tl = dir > 0 ? e.tlF : e.tlB, tr = dir > 0 ? e.trF : e.trB;
+    const ok = (tl + tr) > 0 && (s1 - s0) > TURN_LEN + TAPER + 8;
+    if (dir > 0) { e.okF = ok; e.zlF = ok ? tl : 0; e.zrF = ok ? tr : 0; }
+    else { e.okB = ok; e.zlB = ok ? tl : 0; e.zrB = ok ? tr : 0; }
+    resizeLanes(L.tl, ok ? tl : 0, j => newLane(L, 'L', n, j), () => L.lanes[n - 1]);
+    resizeLanes(L.tr, ok ? tr : 0, j => newLane(L, 'R', -1, j), () => L.lanes[0]);
+    for (const ln of L.tl.concat(L.tr)) { ln.s0 = s1 - TURN_LEN; ln.s1 = s1; if (ln.kind === 'L') ln.idx = n; }
+    L.allLanes = L.tr.slice().reverse().concat(L.lanes, L.tl);
+    L.allLanes.forEach((ln, i) => { ln.slot = i; });
     L.len = s1 - s0;
   }
 }
@@ -292,6 +321,8 @@ function linkHeadStart(L) {
   const e = L.edge;
   return L.dir > 0 ? { x: e.tx[0], y: e.ty[0] } : { x: -e.tx[e.n], y: -e.ty[e.n] };
 }
+function linkArrows(L) { return L.dir > 0 ? L.edge.arrF : L.edge.arrB; }
+function kindBit(k) { return k === 'R' ? ARR_R : k === 'S' ? ARR_S : ARR_L; }
 
 // ---------- Abbiegebeziehungen ----------
 function makeMove(N, inLane, outLane, turn, kind) {
@@ -308,8 +339,7 @@ function makeMove(N, inLane, outLane, turn, kind) {
     if (i > 0) ss[i] = ss[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
   }
   const len = Math.max(ss[S], 0.2);
-  const vIn = inLane.link.speed, vOut = outLane.link.speed;
-  let vmax = Math.min(vIn, vOut);
+  let vmax = Math.min(inLane.link.speed, outLane.link.speed);
   if (Math.abs(turn) > 0.2) vmax = clamp(Math.sqrt(2.8 * len / Math.abs(turn)), 3.5, vmax);
   return { id: Net.moveId++, node: N, inLane, outLane, outLink: outLane.link, turn, kind, xs, ys, ss, len, vmax, conf: new Map(), vehicles: [] };
 }
@@ -334,6 +364,19 @@ function movePos(m, s, out) {
 
 function edgeImp(e) { return e.kmh * (e.nF + e.nB) + (e.ring ? 100000 : 0); }
 
+function distribute(laneList, outIdx, assign) {
+  const n = laneList.length, k = outIdx.length;
+  if (!n || !k) return;
+  for (let j = 0; j < k; j++) assign.get(laneList[Math.min(n - 1, Math.floor((j + 0.5) / k * n))]).add(outIdx[j]);
+  for (let i = 0; i < n; i++) assign.get(laneList[i]).add(outIdx[Math.min(k - 1, Math.floor((i + 0.5) / n * k))]);
+}
+
+function chooseDefaultCtl(N) {
+  const es = N.edges;
+  const allTown = es.every(e => e.kmh <= 50 && Math.max(e.nF, e.nB) <= 1);
+  return allTown ? 'rvl' : 'auto';
+}
+
 function buildNode(N) {
   N.inLinks = []; N.outLinks = [];
   for (const e of N.edges) {
@@ -346,15 +389,15 @@ function buildNode(N) {
   const deg = N.edges.length;
   for (const L of N.inLinks) L.hEnd = linkHeadEnd(L);
   N.moves = []; N.trans = new Map(); N.transOut = new Map();
-  for (const L of N.inLinks) for (const ln of L.allLanes) ln.moves = [];
-  if (deg >= 3 && !N.ring && N.ctl === 'ringnode') N.ctl = 'auto';
-  if (deg < 3 && !N.ring && N.ctl !== 'auto') N.ctl = 'auto';
+  for (const L of N.inLinks) for (const ln of L.allLanes) { ln.moves = []; ln.arrowMask = 0; }
+  if (N.ctl === 'allstop') N.ctl = 'stop';
+  if (N.ring) N.ctl = 'ringnode';
+  else if (deg < 3) N.ctl = 'default';
+  else if (N.ctl === 'default' || N.ctl === 'ringnode') N.ctl = chooseDefaultCtl(N);
 
-  // Zuordnung der Spuren
-  const plan = []; // {inLane, out, kind, turn}
+  const plan = [];
   for (const Lin of N.inLinks) {
-    const hIn = linkHeadEnd(Lin);
-    const aIn = Math.atan2(hIn.y, hIn.x);
+    const aIn = Math.atan2(Lin.hEnd.y, Lin.hEnd.x);
     let outs = N.outLinks.filter(o => o.edge !== Lin.edge || deg === 1);
     outs = outs.map(o => {
       const h = linkHeadStart(o);
@@ -363,34 +406,38 @@ function buildNode(N) {
       const kind = Math.abs(turn) > 2.6 ? 'U' : turn > 0.5 ? 'R' : turn < -0.5 ? 'L' : 'S';
       return { o, turn, kind };
     }).sort((a, b) => b.turn - a.turn);
+    Lin.outKinds = 0;
+    for (const x of outs) Lin.outKinds |= kindBit(x.kind);
     if (!outs.length) continue;
-    const n = Lin.n, k = outs.length;
-    const assign = Lin.lanes.map(() => new Set());
-    for (let j = 0; j < k; j++) {
-      const c = Math.min(n - 1, Math.floor((j + 0.5) / k * n));
-      assign[c].add(j);
+    const k = outs.length;
+    const lanes = Lin.allLanes;
+    const assign = new Map(lanes.map(ln => [ln, new Set()]));
+    const arr = linkArrows(Lin);
+    if (arr && arr.length === lanes.length) {
+      const hasL = outs.some(x => x.kind === 'L');
+      lanes.forEach((ln, i) => {
+        outs.forEach((x, j) => {
+          if (x.kind === 'U' && (hasL || deg > 1)) return;
+          if (arr[i] & kindBit(x.kind)) assign.get(ln).add(j);
+        });
+      });
+    } else {
+      let pool = outs.map((_, j) => j);
+      const rIdx = outs[0].kind === 'R' ? 0 : -1;
+      const lIdx = (outs[k - 1].kind === 'L' || outs[k - 1].kind === 'U') ? k - 1 : -1;
+      const dedR = Lin.tr.length && rIdx >= 0, dedL = Lin.tl.length && lIdx >= 0 && lIdx !== rIdx;
+      if (dedR && pool.length > 1) pool = pool.filter(j => j !== rIdx);
+      if (dedL && pool.length > 1) pool = pool.filter(j => j !== lIdx);
+      distribute(Lin.lanes, pool, assign);
+      for (const ln of Lin.tr) { if (dedR) assign.get(ln).add(rIdx); else for (const j of assign.get(Lin.lanes[0])) assign.get(ln).add(j); }
+      for (const ln of Lin.tl) { if (dedL) assign.get(ln).add(lIdx); else for (const j of assign.get(Lin.lanes[Lin.n - 1])) assign.get(ln).add(j); }
     }
-    for (let i = 0; i < n; i++) {
-      const j = Math.min(k - 1, Math.floor((i + 0.5) / n * k));
-      assign[i].add(j);
-    }
-    // Geradeaus-Spuren grosszuegiger: jede Spur, die nur Abbieger hat, aber neben Geradeaus liegt -> ok
-    let turnAssign = null;
-    if (Lin.turnLane && k >= 2 && outs[k - 1].turn < -0.35) {
-      turnAssign = k - 1;
-      for (let i = 0; i < n; i++) {
-        if (assign[i].has(k - 1) && assign[i].size > 1) assign[i].delete(k - 1);
-      }
-      // falls normale Spuren nichts mehr haben -> leftmost bekommt naechsten
-    }
-    for (let i = 0; i < n; i++) for (const j of assign[i]) plan.push({ inLane: Lin.lanes[i], out: outs[j].o, kind: outs[j].kind, turn: outs[j].turn, Lin });
-    if (turnAssign !== null) plan.push({ inLane: Lin.turnLane, out: outs[turnAssign].o, kind: outs[turnAssign].kind, turn: outs[turnAssign].turn, Lin });
-    else if (Lin.turnLane) {
-      // Abbiegespur ohne Linksabbieger: fuehrt nach links/geradeaus wie linke Spur
-      for (const j of assign[n - 1]) plan.push({ inLane: Lin.turnLane, out: outs[j].o, kind: outs[j].kind, turn: outs[j].turn, Lin });
+    for (const ln of lanes) for (const j of assign.get(ln)) {
+      ln.arrowMask |= kindBit(outs[j].kind);
+      plan.push({ inLane: ln, out: outs[j].o, kind: outs[j].kind, turn: outs[j].turn, Lin });
     }
   }
-  // Zielspuren je Ausfahrt bestimmen
+  // Zielspuren je Ausfahrt
   const byOut = new Map();
   for (const p of plan) {
     if (!byOut.has(p.out)) byOut.set(p.out, new Map());
@@ -402,10 +449,9 @@ function buildNode(N) {
     const m = o.n;
     const hO = linkHeadStart(o), aO = Math.atan2(hO.y, hO.x);
     const fl = [...feeders.entries()].map(([Lin, ps]) => {
-      const h = linkHeadEnd(Lin);
-      let key = angNorm(Math.atan2(-h.y, -h.x) - aO);
+      let key = angNorm(Math.atan2(-Lin.hEnd.y, -Lin.hEnd.x) - aO);
       if (key < 0) key += TAU;
-      ps.sort((a, b) => (a.inLane.turn ? 99 : a.inLane.idx) - (b.inLane.turn ? 99 : b.inLane.idx));
+      ps.sort((a, b) => a.inLane.slot - b.inLane.slot);
       return { Lin, ps, key };
     }).sort((a, b) => a.key - b.key);
     const total = fl.reduce((s, f) => s + f.ps.length, 0);
@@ -419,7 +465,10 @@ function buildNode(N) {
           if (g >= m) p.outIdx = g === 1 ? 0 : Math.round(k * (m - 1) / (g - 1));
           else if (p.kind === 'R') p.outIdx = k;
           else if (p.kind === 'L' || p.kind === 'U') p.outIdx = m - g + k;
-          else p.outIdx = clamp(G[0].inLane.turn ? m - g : G[0].inLane.idx, 0, m - g) + k;
+          else {
+            const l0 = G[0].inLane;
+            p.outIdx = clamp(l0.kind === 'N' ? l0.idx : l0.kind === 'L' ? m - g : 0, 0, m - g) + k;
+          }
         });
       }
     }
@@ -462,13 +511,8 @@ function pathCross(a, b) {
   const S = a.xs.length - 1;
   for (let i = 0; i < S; i++) for (let j = 0; j < S; j++) {
     const r = segIntersect(a.xs[i], a.ys[i], a.xs[i + 1], a.ys[i + 1], b.xs[j], b.ys[j], b.xs[j + 1], b.ys[j + 1]);
-    if (r) {
-      const sa = a.ss[i] + r.t * (a.ss[i + 1] - a.ss[i]);
-      const sb = b.ss[j] + r.u * (b.ss[j + 1] - b.ss[j]);
-      return { sa, sb };
-    }
+    if (r) return { sa: a.ss[i] + r.t * (a.ss[i + 1] - a.ss[i]), sb: b.ss[j] + r.u * (b.ss[j + 1] - b.ss[j]) };
   }
-  // sehr nahe Vorbeifahrt (< 2 m) zaehlt ebenfalls als Konflikt
   let best = null;
   for (let i = 1; i < S; i++) for (let j = 1; j < S; j++) {
     const d = Math.hypot(a.xs[i] - b.xs[j], a.ys[i] - b.ys[j]);
@@ -478,11 +522,11 @@ function pathCross(a, b) {
 }
 
 function computeRanks(N) {
-  N.rank = new Map(); N.pen = new Map(); N.major = null;
+  N.rank = new Map(); N.pen = new Map(); N.major = null; N.majorCount = 0;
   const deg = N.edges.length;
   if (N.ring) {
     for (const L of N.inLinks) N.rank.set(L, L.edge.ring ? 1 : 0);
-  } else if (deg <= 2) {
+  } else if (deg <= 2 || N.ctl === 'rvl' || N.ctl === 'light') {
     for (const L of N.inLinks) N.rank.set(L, 1);
   } else {
     const pairs = [];
@@ -490,8 +534,7 @@ function computeRanks(N) {
     for (let i = 0; i < es.length; i++) for (let j = i + 1; j < es.length; j++) {
       const di = edgeDirAt(es[i], N), dj = edgeDirAt(es[j], N);
       const ang = Math.acos(clamp(di.x * dj.x + di.y * dj.y, -1, 1));
-      const score = edgeImp(es[i]) + edgeImp(es[j]) + (ang > 2.3 ? 10000 : ang * 1000);
-      pairs.push({ a: es[i], b: es[j], score });
+      pairs.push({ a: es[i], b: es[j], score: edgeImp(es[i]) + edgeImp(es[j]) + (ang > 2.3 ? 10000 : ang * 1000) });
     }
     pairs.sort((p, q) => q.score - p.score);
     const pk = pairs[N.majorPick % pairs.length];
@@ -504,7 +547,7 @@ function computeRanks(N) {
     let p = 0;
     if (deg >= 3 || N.ring) {
       if (N.ctl === 'light') p = 9;
-      else if (N.ctl === 'allstop') p = 7;
+      else if (N.ctl === 'rvl') p = 3;
       else if (N.ring) p = r ? 0.5 : 3;
       else p = r ? 0.8 : (N.ctl === 'stop' ? 6 : 4);
     }
@@ -533,7 +576,7 @@ function computePhases(N) {
     if (best) { used.add(best); g.push(best); }
     N.phases.push(g);
   }
-  if (!N.light || N.light.phase >= N.phases.length) N.light = { phase: 0, stage: 'G', t: 0 };
+  if (!N.light || N.light.phase >= N.phases.length) N.light = { phase: 0, stage: 'G', t: 0, lastPass: 0 };
 }
 
 function lightState(N, L) {
@@ -552,9 +595,8 @@ function netRebuild() {
   for (const e of dirtyEdges) { edgeProps(e); if (e.geomDirty) edgeGeom(e); }
   for (const N of dirtyNodes) computeTrims(N);
   for (const e of dirtyEdges) { fixTrims(e); buildLinks(e); }
-  // Knoten an beiden Enden geaenderter Kanten neu berechnen
   const rebuildNodes = new Set(dirtyNodes);
-  for (const e of dirtyEdges) { rebuildNodes.add(e.A); rebuildNodes.add(e.B); }
+  for (const e of dirtyEdges) { rebuildNodes.add(e.A); rebuildNodes.add(e.B); Net.boxes.push(e.bb); }
   Net.links = []; Net.lanes = [];
   for (const e of Net.edges.values()) {
     for (const L of [e.linkF, e.linkB]) {
@@ -565,6 +607,7 @@ function netRebuild() {
   }
   for (const N of rebuildNodes) if (!N.deleted) buildNode(N);
   processTransfers();
+  updateHouses();
   Net.rev++;
   if (typeof Sim !== 'undefined') Sim.onNetChanged(rebuildNodes);
 }
@@ -579,10 +622,9 @@ function processTransfers() {
           if (v.dead) continue;
           const u = dir > 0 ? v.s : old.len - v.s;
           const tgtE = u < uSplit ? e1 : e2;
-          if (!Net.edges.has(tgtE.id)) { v.kill = true; continue; }
-          const NL = dir > 0 ? tgtE.linkF : tgtE.linkB;
+          const NL = Net.edges.has(tgtE.id) ? (dir > 0 ? tgtE.linkF : tgtE.linkB) : null;
           if (!NL) { v.kill = true; continue; }
-          const tgtLane = ln.turn ? (tgtE === (dir > 0 ? e2 : e1) && NL.turnLane ? NL.turnLane : NL.lanes[NL.n - 1]) : NL.lanes[Math.min(ln.idx, NL.n - 1)];
+          const tgtLane = ln.kind === 'N' ? NL.lanes[Math.min(ln.idx, NL.n - 1)] : NL.lanes[ln.kind === 'L' ? NL.n - 1 : 0];
           let ns;
           if (dir > 0) ns = tgtE === e1 ? u : u - uSplit;
           else ns = tgtE === e2 ? old.len - u : uSplit - u;
@@ -596,13 +638,61 @@ function processTransfers() {
   Net.transfers = [];
 }
 
+// ---------- Haeuser anbinden ----------
+function houseAccessible(e) { return e.level === 0 && !e.ring && e.median === 0 && e.kmh <= 100; }
+
+function attachTown(t) {
+  if (!t.houses) return;
+  const R = Terrain.townRadius(t) + 50;
+  const cands = [];
+  for (const e of Net.edges.values()) {
+    if (!e.bb || e.level < 0) continue;
+    if (e.bb.x1 < t.x - R || e.bb.x0 > t.x + R || e.bb.y1 < t.y - R || e.bb.y0 > t.y + R) continue;
+    cands.push(e);
+  }
+  let nAtt = 0;
+  for (const h of t.houses) {
+    h.att = null; h.gone = false;
+    const hr = Math.max(h.w, h.h) * 0.5;
+    let best = null;
+    for (const e of cands) {
+      if (h.x < e.bb.x0 - 60 || h.x > e.bb.x1 + 60 || h.y < e.bb.y0 - 60 || h.y > e.bb.y1 + 60) continue;
+      for (let i = 0; i < e.n; i++) {
+        const q = distPointSeg(h.x, h.y, e.px[i], e.py[i], e.px[i + 1], e.py[i + 1]);
+        if (e.level === 0 && q.d < e.hw + hr * 0.7) h.gone = true;
+        if (houseAccessible(e) && (!best || q.d < best.d)) best = { e, u: (i + q.t) * e.step, d: q.d };
+      }
+    }
+    if (h.gone) continue;
+    if (best && best.d < best.e.hw + hr + 22) {
+      const e = best.e;
+      h.att = { edge: e, u: clamp(best.u, e.trimA + 3, e.len - e.trimB - 3) };
+      nAtt++;
+    }
+  }
+  t.nAtt = nAtt;
+}
+
+function updateHouses() {
+  const towns = new Set();
+  for (const b of Net.boxes) {
+    if (!b || !isFinite(b.x0)) continue;
+    for (const t of Terrain.townsInRect(b.x0 - 400, b.y0 - 400, b.x1 + 400, b.y1 + 400)) towns.add(t);
+  }
+  Net.boxes = [];
+  for (const t of towns) {
+    if (!t.houses) Terrain.townHouses(t);
+    attachTown(t);
+  }
+  if (towns.size && typeof Sim !== 'undefined') Sim.housesDirty = true;
+}
+
 // ---------- Auswahl / Snapping ----------
 function pickNode(x, y, r) {
   let best = null, bd = r;
   for (const N of Net.nodes.values()) {
-    const rr = N.town ? Math.max(r, 30) : r;
     const d = Math.hypot(N.x - x, N.y - y);
-    if (d < rr && (!best || d < bd)) { best = N; bd = d; }
+    if (d < bd) { best = N; bd = d; }
   }
   return best;
 }
@@ -625,11 +715,11 @@ function pickEdge(x, y, r, filter) {
   return best;
 }
 
-function snapPoint(x, y, scale, opts) {
-  const r = Math.max(4, 14 / scale);
+function snapPoint(x, y, scale) {
+  const r = Math.max(4, 16 / scale);
   const N = pickNode(x, y, r);
   if (N) return { type: 'node', node: N, x: N.x, y: N.y };
-  const pe = pickEdge(x, y, Math.max(3, 10 / scale), e => !e.ring);
+  const pe = pickEdge(x, y, Math.max(3, 12 / scale), e => !e.ring);
   if (pe) {
     if (pe.u < 8) return { type: 'node', node: pe.edge.A, x: pe.edge.A.x, y: pe.edge.A.y };
     if (pe.u > pe.edge.len - 8) return { type: 'node', node: pe.edge.B, x: pe.edge.B.x, y: pe.edge.B.y };
@@ -646,16 +736,11 @@ function splitEdgeAt(e, t) {
   const spec = edgeSpec(e);
   const e1 = addEdge(e.A, X, g1[1], spec);
   const e2 = addEdge(X, e.B, g2[1], spec);
-  e1.turnB = e.turnB; e2.turnF = e.turnF;
+  e1.tlB = e.tlB; e1.trB = e.trB; e1.arrB = e.arrB;
+  e2.tlF = e.tlF; e2.trF = e.trF; e2.arrF = e.arrF;
   e1.accidents = e2.accidents = Math.round(e.accidents / 2);
   Net.transfers.push({ old: e, uSplit, e1, e2 });
-  // alte Kante entfernen, Fahrzeuge bleiben fuer den Transfer erhalten
-  Net.edges.delete(e.id);
-  for (const N of [e.A, e.B]) {
-    const i = N.edges.indexOf(e);
-    if (i >= 0) N.edges.splice(i, 1);
-    Net.dirty.add(N);
-  }
+  detachEdge(e);
   for (const L of [e.linkF, e.linkB]) if (L) { L.dead = true; for (const ln of L.allLanes) ln.alive = false; }
   return X;
 }
@@ -682,24 +767,22 @@ function buildRoad(s0, ctrl, s1, spec, level) {
   const c = ctrl ? { x: ctrl.x, y: ctrl.y } : { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
   const approxLen = Math.hypot(c.x - p0.x, c.y - p0.y) + Math.hypot(p1.x - c.x, p1.y - c.y);
   if (approxLen < 10) return { ok: false, msg: 'Straße zu kurz' };
-  if (s0.type === 'node' && s1.type === 'node' && s0.node === s1.node) return { ok: false, msg: 'Start = Ende' };
-  // Kreuzungen sammeln (nur ebenerdig)
+  if (s0.type === 'node' && s1.type === 'node' && s0.node === s1.node) return { ok: false, msg: 'Start und Ende sind gleich' };
   const crosses = [];
   if (level === 0) {
     const NS = Math.max(8, Math.ceil(approxLen / 2));
     const pts = [];
     for (let i = 0; i <= NS; i++) pts.push(qPoint(p0, c, p1, i / NS));
-    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
-    for (const p of pts) { bx0 = Math.min(bx0, p.x); by0 = Math.min(by0, p.y); bx1 = Math.max(bx1, p.x); by1 = Math.max(by1, p.y); }
+    const bb = boxOf(pts);
     for (const e of Net.edges.values()) {
       if (e.level !== 0) continue;
-      if (e.bb.x1 < bx0 - 2 || e.bb.x0 > bx1 + 2 || e.bb.y1 < by0 - 2 || e.bb.y0 > by1 + 2) continue;
+      if (e.bb.x1 < bb.x0 - 2 || e.bb.x0 > bb.x1 + 2 || e.bb.y1 < bb.y0 - 2 || e.bb.y0 > bb.y1 + 2) continue;
       for (let i = 0; i < NS; i++) for (let j = 0; j < e.n; j++) {
         const r = segIntersect(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, e.px[j], e.py[j], e.px[j + 1], e.py[j + 1]);
         if (!r) continue;
         const x = lerp(pts[i].x, pts[i + 1].x, r.t), y = lerp(pts[i].y, pts[i + 1].y, r.t);
         if (Math.hypot(x - p0.x, y - p0.y) < 5 || Math.hypot(x - p1.x, y - p1.y) < 5) continue;
-        if (e.ring) return { ok: false, msg: 'Kreuzt einen Kreisverkehr' };
+        if (e.ring) return { ok: false, msg: 'Kreuzt einen Kreisverkehr – dort an einen Knoten anschließen' };
         crosses.push({ t: (i + r.t) / NS, e, u: (j + r.u) * e.step, x, y });
       }
     }
@@ -714,13 +797,13 @@ function buildRoad(s0, ctrl, s1, spec, level) {
   const S = resolveSnap(s0);
   const seq = [S], ts = [0];
   for (const cr of cr2) {
-    let X;
     let e = cr.e, u = cr.u;
     if (!Net.edges.has(e.id)) {
       const pe = pickEdge(cr.x, cr.y, 3, x => x.level === 0 && !x.ring);
       if (!pe) continue;
       e = pe.edge; u = pe.u;
     }
+    let X;
     if (u < 9) X = e.A;
     else if (u > e.len - 9) X = e.B;
     else X = splitEdgeAt(e, edgeTAtU(e, u));
@@ -728,10 +811,9 @@ function buildRoad(s0, ctrl, s1, spec, level) {
     seq.push(X); ts.push(cr.t);
   }
   const E = resolveSnap(s1);
-  if (E === S) { netRebuild(); return { ok: false, msg: 'Start = Ende' }; }
+  if (E === S) { netRebuild(); return { ok: false, msg: 'Start und Ende sind gleich' }; }
   seq.push(E); ts.push(1);
   let rem = [p0, c, p1], prevT = 0;
-  const made = [];
   for (let k = 1; k < seq.length; k++) {
     const t = ts[k];
     let g;
@@ -743,38 +825,32 @@ function buildRoad(s0, ctrl, s1, spec, level) {
     }
     prevT = t;
     const A = seq[k - 1], B = seq[k];
-    if (A === B) continue;
-    if (Math.hypot(A.x - B.x, A.y - B.y) < 2) continue;
-    const dup = A.edges.find(e => ((e.A === A && e.B === B) || (e.A === B && e.B === A)) &&
-      Math.hypot(e.c.x - g[1].x, e.c.y - g[1].y) < 6);
+    if (A === B || Math.hypot(A.x - B.x, A.y - B.y) < 2) continue;
+    const dup = A.edges.find(e => ((e.A === A && e.B === B) || (e.A === B && e.B === A)) && Math.hypot(e.c.x - g[1].x, e.c.y - g[1].y) < 6);
     if (dup) continue;
-    // Kontrollpunkt an tatsaechliche Endpunkte anpassen
     const cc = { x: g[1].x + ((A.x - g[0].x) + (B.x - g[2].x)) / 2, y: g[1].y + ((A.y - g[0].y) + (B.y - g[2].y)) / 2 };
-    made.push(addEdge(A, B, cc, Object.assign({}, spec, { level })));
+    addEdge(A, B, cc, Object.assign({}, spec, { level }));
   }
   netRebuild();
-  return { ok: true, end: E, edges: made };
+  return { ok: true, end: E };
 }
 
 function buildRoundabout(N) {
-  if (N.ring) return { ok: false, msg: 'Ist bereits Teil eines Kreisverkehrs' };
-  if (N.town) return { ok: false, msg: 'Nicht im Ortszentrum möglich' };
+  if (N.ring) return { ok: false, msg: 'Ist bereits ein Kreisverkehr' };
   if (N.edges.length < 2) return { ok: false, msg: 'Mindestens 2 Straßen nötig' };
-  if (N.edges.some(e => e.level !== 0)) return { ok: false, msg: 'Nur bei ebenerdigen Straßen' };
+  if (N.edges.some(e => e.level !== 0)) return { ok: false, msg: 'Nur bei ebenerdigen Straßen möglich' };
   const maxHw = Math.max(...N.edges.map(e => e.hw));
   const twoLane = N.edges.some(e => Math.max(e.nF, e.nB) >= 2);
   const R = 13 + maxHw * 1.2 + (twoLane ? 4 : 0);
-  for (const e of N.edges) if (e.len < R + 14) return { ok: false, msg: 'Anschlussstraßen zu kurz für Kreisverkehr' };
+  for (const e of N.edges) if (e.len < R + 14) return { ok: false, msg: 'Anschlussstraßen zu kurz für einen Kreisverkehr' };
   const ringId = Net.nextId++;
   const cx = N.x, cy = N.y;
   const ringNodes = [];
   for (const e of [...N.edges]) {
     let u;
-    const step = 0.5;
-    if (e.A === N) { u = 0; while (u < e.len) { const p = edgeSample(e, u); if (Math.hypot(p.x - cx, p.y - cy) >= R) break; u += step; } }
-    else { u = e.len; while (u > 0) { const p = edgeSample(e, u); if (Math.hypot(p.x - cx, p.y - cy) >= R) break; u -= step; } }
+    if (e.A === N) { u = 0; while (u < e.len) { const p = edgeSample(e, u); if (Math.hypot(p.x - cx, p.y - cy) >= R) break; u += 0.5; } }
+    else { u = e.len; while (u > 0) { const p = edgeSample(e, u); if (Math.hypot(p.x - cx, p.y - cy) >= R) break; u -= 0.5; } }
     const X = splitEdgeAt(e, edgeTAtU(e, u));
-    // inneres Stueck entfernen
     for (const ie of [...X.edges]) if (ie.A === N || ie.B === N) removeEdge(ie);
     ringNodes.push(X);
   }
@@ -782,7 +858,7 @@ function buildRoundabout(N) {
   for (const X of ringNodes) {
     const a = Math.atan2(X.y - cy, X.x - cx);
     X.x = cx + Math.cos(a) * R; X.y = cy + Math.sin(a) * R;
-    X.ang = a; X.ring = ringId; X.ctl = 'ringnode';
+    X.ang = a; X.ring = ringId;
     for (const e of X.edges) e.geomDirty = true;
   }
   ringNodes.sort((a, b) => a.ang - b.ang);
@@ -791,11 +867,10 @@ function buildRoundabout(N) {
     const a = ringNodes[i], b = ringNodes[(i + 1) % ringNodes.length];
     list.push(a);
     let gap = b.ang - a.ang; if (i === ringNodes.length - 1) gap += TAU;
-    if (ringNodes.length === 1) gap = TAU;
     const extra = Math.max(0, Math.ceil(gap / 1.6) - 1);
     for (let k = 1; k <= extra; k++) {
       const ang = a.ang + gap * k / (extra + 1);
-      const M = addNode(cx + Math.cos(ang) * R, cy + Math.sin(ang) * R, { ring: ringId, ctl: 'ringnode' });
+      const M = addNode(cx + Math.cos(ang) * R, cy + Math.sin(ang) * R, { ring: ringId });
       M.ang = ang;
       list.push(M);
     }
@@ -814,30 +889,34 @@ function buildRoundabout(N) {
 }
 
 function upgradeEdge(e, spec) {
-  const same = e.nF === spec.nF && e.nB === spec.nB && e.kmh === spec.speed;
+  const same = e.nF === spec.nF && e.nB === spec.nB && e.kmh === spec.speed && e.median === (spec.nB ? spec.median || 0 : 0);
   if (e.ring) {
     e.nF = clamp(spec.nF, 1, 2); e.kmh = Math.min(spec.speed, 50);
   } else if (same && e.nB === 0) {
-    // Einbahnstrasse umdrehen
     const A = e.A; e.A = e.B; e.B = A;
-    const t = e.turnF; e.turnF = e.turnB; e.turnB = t;
+    [e.tlF, e.tlB] = [e.tlB, e.tlF]; [e.trF, e.trB] = [e.trB, e.trF]; [e.arrF, e.arrB] = [e.arrB, e.arrF];
     killLink(e.linkF); killLink(e.linkB); e.linkF = e.linkB = null;
     e.geomDirty = true;
   } else {
+    if (e.nF !== spec.nF) e.arrF = null;
+    if (e.nB !== spec.nB) e.arrB = null;
     e.nF = spec.nF; e.nB = spec.nB; e.kmh = spec.speed;
     e.median = spec.nB > 0 ? (spec.median || 0) : 0;
-    if (e.nB === 0) { killLink(e.linkB); e.linkB = null; e.turnB = false; }
+    if (e.nB === 0) { killLink(e.linkB); e.linkB = null; e.tlB = e.trB = 0; e.arrB = null; }
   }
   Net.dirty.add(e.A); Net.dirty.add(e.B);
   netRebuild();
 }
 
-function toggleTurnLane(e, nearB) {
-  if (nearB) { if (e.nF === 0) return false; e.turnF = !e.turnF; }
-  else { if (e.nB === 0) return false; e.turnB = !e.turnB; }
+// Zufahrt (Link in Richtung eines Knotens) bearbeiten
+function setApproach(L, changes) {
+  const e = L.edge, f = L.dir > 0;
+  if ('tl' in changes) { e[f ? 'tlF' : 'tlB'] = clamp(changes.tl, 0, 2); e[f ? 'arrF' : 'arrB'] = null; }
+  if ('tr' in changes) { e[f ? 'trF' : 'trB'] = clamp(changes.tr, 0, 1); e[f ? 'arrF' : 'arrB'] = null; }
+  if ('n' in changes) { e[f ? 'nF' : 'nB'] = clamp(changes.n, 1, 4); e[f ? 'arrF' : 'arrB'] = null; }
+  if ('arr' in changes) e[f ? 'arrF' : 'arrB'] = changes.arr;
   Net.dirty.add(e.A); Net.dirty.add(e.B);
   netRebuild();
-  return nearB ? e.turnF : e.turnB;
 }
 
 function setNodeControl(N, ctl) {
@@ -849,8 +928,11 @@ function setNodeControl(N, ctl) {
 // ---------- Speichern / Laden ----------
 function netSerialize() {
   return {
-    nodes: [...Net.nodes.values()].map(N => ({ id: N.id, x: N.x, y: N.y, ctl: N.ctl, town: N.town ? N.town.id : null, ring: N.ring, ang: N.ang, mp: N.majorPick, acc: N.accidents })),
-    edges: [...Net.edges.values()].map(e => ({ id: e.id, a: e.A.id, b: e.B.id, c: e.c, nF: e.nF, nB: e.nB, kmh: e.kmh, median: e.median, level: e.level, ring: e.ring, tF: e.turnF, tB: e.turnB, acc: e.accidents })),
+    nodes: [...Net.nodes.values()].map(N => ({ id: N.id, x: N.x, y: N.y, ctl: N.ctl, g: N.gruen ? 1 : 0, ring: N.ring, ang: N.ang, mp: N.majorPick, acc: N.accidents })),
+    edges: [...Net.edges.values()].map(e => ({
+      id: e.id, a: e.A.id, b: e.B.id, c: e.c, nF: e.nF, nB: e.nB, kmh: e.kmh, median: e.median, level: e.level, ring: e.ring,
+      t: [e.tlF, e.trF, e.tlB, e.trB], arrF: e.arrF, arrB: e.arrB, acc: e.accidents,
+    })),
     rings: [...Net.rings.entries()],
     nextId: Net.nextId,
   };
@@ -860,13 +942,8 @@ function netDeserialize(d) {
   netReset();
   const map = new Map();
   for (const n of d.nodes) {
-    const N = addNode(n.x, n.y, { ctl: n.ctl, ring: n.ring || 0, ang: n.ang, majorPick: n.mp || 0, accidents: n.acc || 0 });
+    const N = addNode(n.x, n.y, { ctl: n.ctl, gruen: !!n.g, ring: n.ring || 0, ang: n.ang, majorPick: n.mp || 0, accidents: n.acc || 0 });
     Net.nodes.delete(N.id); N.id = n.id; Net.nodes.set(N.id, N);
-    if (n.town) {
-      const [cx, cy] = n.town.split(':').map(Number);
-      const t = Terrain.townAt(cx, cy);
-      if (t) { t.node = N; N.town = t; }
-    }
     map.set(n.id, N);
   }
   for (const e of d.edges) {
@@ -874,8 +951,10 @@ function netDeserialize(d) {
     if (!A || !B) continue;
     const E = addEdge(A, B, e.c, { nF: e.nF, nB: e.nB, speed: e.kmh, median: e.median, level: e.level, ring: e.ring });
     Net.edges.delete(E.id); E.id = e.id; Net.edges.set(E.id, E);
-    E.turnF = !!e.tF; E.turnB = !!e.tB; E.accidents = e.acc || 0;
+    if (e.t) [E.tlF, E.trF, E.tlB, E.trB] = e.t;
+    E.arrF = e.arrF || null; E.arrB = e.arrB || null; E.accidents = e.acc || 0;
   }
+  for (const N of [...Net.nodes.values()]) if (!N.edges.length) removeNodeOnly(N);
   for (const [k, v] of (d.rings || [])) Net.rings.set(k, v);
   Net.nextId = Math.max(d.nextId || 1, Net.nextId);
   netRebuild();

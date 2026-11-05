@@ -7,35 +7,35 @@ const TRUCK_COLORS = ['#d8d2c4', '#5d6d7e', '#a04000', '#1e8449', '#e8e2d0'];
 
 const Sim = {
   vehicles: [], time: 0, tick: 0, nextVid: 1, demand: 1, errMul: 1, speed: 1, paused: false,
-  routes: new Map(), nextRoute: 0, townNodes: [], lightNodes: [],
-  stats: { trips: 0, accidents: 0, lost: 0, gaveUp: 0, rejected: 0, towed: 0, tripTime: 0 },
-  accidents: [], history: [], lastHist: 0, lastStat: 0,
+  routes: new Map(), epoch: 0, nextEpoch: 0, travel: null, lightNodes: [],
+  homes: [], dests: [], housesDirty: true, pending: [],
+  stats: null, accidents: [], history: [], lastHist: 0, lastStat: 0,
   flowIdx: 1, jam: 0, histTrips: 0, histAcc: 0, onAccident: null,
 
   reset() {
-    this.vehicles = []; this.time = 0; this.tick = 0; this.routes = new Map();
-    this.stats = { trips: 0, accidents: 0, lost: 0, gaveUp: 0, rejected: 0, towed: 0, tripTime: 0 };
+    this.vehicles = []; this.time = 0; this.tick = 0; this.routes = new Map(); this.epoch++; this.pending = [];
+    this.stats = { trips: 0, accidents: 0, lost: 0, gaveUp: 0, towed: 0, tripTime: 0 };
     this.accidents = []; this.history = []; this.lastHist = 0; this.lastStat = 0; this.flowIdx = 1; this.jam = 0;
-    this.histTrips = 0; this.histAcc = 0;
+    this.histTrips = 0; this.histAcc = 0; this.housesDirty = true;
   },
 
   onNetChanged(nodes) {
     for (const N of nodes) if (!N.deleted) N.occ = new Set();
     this.lightNodes = [...Net.nodes.values()].filter(N => N.ctl === 'light' && N.phases.length);
-    computeRoutes();
+    this.epoch++; this.routes = new Map(); this.travel = null;
+    if (this.housesDirty) refreshHouses();
     for (const v of this.vehicles) {
       if (v.dead) continue;
-      if (v.kill) { removeVehicle(v); continue; }
+      if (v.kill || !v.dest.att) { removeVehicle(v); this.stats.lost++; continue; }
       if (v.move) {
         if (v.move.node.deleted) { removeVehicle(v); continue; }
         if (nodes.has(v.move.node)) v.move.node.occ.add(v);
       } else if (v.lane) {
         if (!v.lane.alive) { removeVehicle(v); continue; }
-        if (nodes.has(v.lane.link.to) || (v.committed && v.committed.node.deleted)) {
-          if (v.committed) v.committed.node.occ.delete(v);
-          v.committed = null;
-          setNext(v);
-        } else if (v.nextMove && !v.lane.moves.includes(v.nextMove)) setNext(v);
+        if (v.committed) v.committed.node.occ.delete(v);
+        v.committed = null;
+        v.nextLink = null;
+        setNext(v);
       }
     }
     this.vehicles = this.vehicles.filter(v => !v.dead);
@@ -43,37 +43,55 @@ const Sim = {
 
   step(dt) {
     this.time += dt; this.tick++;
+    if (this.housesDirty) refreshHouses();
+    if (this.time >= this.nextEpoch) { this.epoch++; this.nextEpoch = this.time + 4; this.travel = null; }
     updateLights(dt);
-    if (this.time >= this.nextRoute) computeRoutes();
     spawnStep(dt);
     sortLanes();
-    for (const v of this.vehicles) if (!v.dead && v.lane && !v.crashed && !v.committed && v.lcCool <= 0 && ((v.id + this.tick) % 4) === 0) tryLaneChange(v);
+    for (const v of this.vehicles) if (!v.dead && v.lane && !v.crashed && !v.committed && !v.exitHere && v.lcCool <= 0 && ((v.id + this.tick) % 4) === 0) tryLaneChange(v);
     for (const ln of Net.lanes) { const a = ln.vehicles; for (let i = 0; i < a.length; i++) a[i].idx = i; }
     for (const v of this.vehicles) if (!v.dead) computeAccel(v);
     for (const v of this.vehicles) if (!v.dead) integrate(v, dt);
     checkCollisions();
     for (const v of this.vehicles) {
       if (v.dead) continue;
-      if (v.crashed && this.time > v.crashed) { removeVehicle(v); this.stats.towed++; }
+      if (v.kill) { removeVehicle(v); this.stats.lost++; }
+      else if (v.crashed && this.time > v.crashed) { removeVehicle(v); this.stats.towed++; }
       else if (!v.crashed && v.waitT > 200) { removeVehicle(v); this.stats.gaveUp++; }
+      else if (v.lost && this.time - v.lostT > 45) { removeVehicle(v); this.stats.lost++; }
     }
     if (this.tick % 30 === 0) this.vehicles = this.vehicles.filter(v => !v.dead);
     if (this.time - this.lastStat >= 1) { this.lastStat = this.time; updateStats(); }
     if (this.time - this.lastHist >= 5) { this.lastHist = this.time; pushHistory(); }
   },
 };
+Sim.reset();
+
+function refreshHouses() {
+  Sim.housesDirty = false;
+  const homes = [], dests = [];
+  for (const t of Terrain.towns.values()) {
+    if (!t || !t.houses) continue;
+    for (const h of t.houses) {
+      if (!h.att) continue;
+      dests.push(h);
+      if (h.kind === 'home') homes.push(h);
+    }
+  }
+  Sim.homes = homes; Sim.dests = dests;
+}
 
 function newVehicle(lane, dest, origin) {
   const r = Math.random;
-  const truck = r() < 0.1;
+  const truck = r() < 0.08;
   return {
     id: Sim.nextVid++, lane, move: null, s: lane.s0, v: 0, acc: 0, dest, origin, truck,
     len: truck ? 12 : 4.3 + r() * 0.7, w: truck ? 2.5 : 1.85,
     drv: truck ? { a: 1.0, b: 2.4, T: 1.4 + r() * 0.4, s0: 2.2, vf: 0.82 + r() * 0.08, gap: 1.2, vmax: 25 }
       : { a: 1.9 + r() * 0.8, b: 2.8, T: 0.8 + r() * 0.6, s0: 1.6, vf: 0.92 + r() * 0.2, gap: 0.75 + r() * 0.5, vmax: 50 },
     color: truck ? TRUCK_COLORS[Math.floor(r() * TRUCK_COLORS.length)] : CAR_COLORS[Math.floor(r() * CAR_COLORS.length)],
-    nextLink: null, nextMove: null, exitHere: false, committed: null, stopped: false, stopT: 0, waitT: 0,
-    err: false, lcOff: 0, lcCool: 1 + r() * 2, crashed: 0, spawnT: Sim.time, dist: 0, lost: false,
+    nextLink: null, nextMove: null, exitHere: false, arriveS: 0, committed: null, stopped: false, stopT: 0, waitT: 0,
+    err: false, lcOff: 0, lcCool: 1 + r() * 2, crashed: 0, spawnT: Sim.time, dist: 0, lost: false, lostT: 0,
     dead: false, kill: false, idx: 0, totalWait: 0,
   };
 }
@@ -94,75 +112,70 @@ function removeVehicle(v) {
 function finishTrip(v) {
   Sim.stats.trips++;
   Sim.stats.tripTime += Sim.time - v.spawnT;
-  if (v.dest && v.dest.town) v.dest.town.arrived++;
   removeVehicle(v);
 }
 
-// ---------- Routing ----------
-function computeRoutes() {
-  Sim.nextRoute = Sim.time + 3;
-  const links = Net.links, nL = links.length;
-  const towns = [];
-  for (const N of Net.nodes.values()) if (N.town && N.edges.length) towns.push(N);
-  Sim.townNodes = towns;
-  const travel = new Float64Array(nL);
-  for (const L of links) travel[L.id] = (Math.max(L.len, 1) + 6) / Math.max(1.2, Math.min(L.avgV, L.speed));
-  const routes = new Map();
-  for (const D of towns) {
-    if (!D.inLinks.length) continue;
-    const cost = new Float64Array(nL).fill(Infinity);
-    const h = new MinHeap();
-    for (const L of D.inLinks) { cost[L.id] = travel[L.id]; h.push(cost[L.id], L); }
-    while (h.size) {
-      const L = h.pop(), c = h.topKey;
-      if (c > cost[L.id]) continue;
-      const N = L.from;
-      const preds = N.trans.get(L);
-      if (!preds) continue;
-      for (const P of preds) {
-        const nc = c + travel[P.id] + (N.pen.get(P) || 0);
-        if (nc < cost[P.id]) { cost[P.id] = nc; h.push(nc, P); }
-      }
-    }
-    routes.set(D.id, cost);
-  }
-  Sim.routes = routes;
-  for (const O of towns) {
-    const t = O.town;
-    t.dests = []; t.sumW = 0;
-    for (const D of towns) {
-      if (D === O) continue;
-      const cost = routes.get(D.id);
-      if (!cost) continue;
-      let best = Infinity;
-      for (const L of O.outLinks) best = Math.min(best, cost[L.id]);
-      if (best < Infinity) {
-        const d = Math.hypot(D.x - O.x, D.y - O.y);
-        const w = D.town.pop / (1 + d / 4000);
-        t.dests.push({ D, w }); t.sumW += w;
-      }
-    }
-  }
+// ---------- Routing (Kosten bis zur Zielstrasse) ----------
+function travelTimes() {
+  if (Sim.travel && Sim.travel.length === Net.links.length) return Sim.travel;
+  const t = new Float64Array(Net.links.length);
+  for (const L of Net.links) t[L.id] = (Math.max(L.len, 1) + 6) / Math.max(1.2, Math.min(L.avgV, L.speed));
+  Sim.travel = t;
+  return t;
 }
+
+function routeCost(E) {
+  const c = Sim.routes.get(E.id);
+  if (c && c.epoch === Sim.epoch) return c.cost;
+  const travel = travelTimes();
+  const cost = new Float64Array(Net.links.length).fill(Infinity);
+  const h = new MinHeap();
+  for (const L of [E.linkF, E.linkB]) if (L) { cost[L.id] = travel[L.id] * 0.5; h.push(cost[L.id], L); }
+  while (h.size) {
+    const L = h.pop(), cc = h.topKey;
+    if (cc > cost[L.id]) continue;
+    const N = L.from;
+    const preds = N.trans.get(L);
+    if (!preds) continue;
+    for (const P of preds) {
+      const nc = cc + travel[P.id] + (N.pen.get(P) || 0);
+      if (nc < cost[P.id]) { cost[P.id] = nc; h.push(nc, P); }
+    }
+  }
+  Sim.routes.set(E.id, { epoch: Sim.epoch, cost });
+  return cost;
+}
+
+function destS(L, D) { return L.dir > 0 ? D.att.u : L.edge.len - D.att.u; }
 
 function chooseNext(v, L) {
   const outs = L.to.transOut.get(L);
   if (!outs || !outs.length) return null;
-  const cost = v.dest ? Sim.routes.get(v.dest.id) : null;
   let best = null, bc = Infinity;
-  if (cost) for (const o of outs) {
-    const c = cost[o.id];
-    if (c < Infinity) { const cc = c * (1 + 0.06 * Math.random()); if (cc < bc) { bc = cc; best = o; } }
+  if (!v.lost && v.dest.att) {
+    const cost = routeCost(v.dest.att.edge);
+    for (const o of outs) {
+      const c = cost[o.id];
+      if (c < Infinity) { const cc = c * (1 + 0.06 * Math.random()); if (cc < bc) { bc = cc; best = o; } }
+    }
   }
-  if (!best) { v.lost = true; best = outs[Math.floor(Math.random() * outs.length)]; }
+  if (!best) {
+    if (!v.lost) { v.lost = true; v.lostT = Sim.time; }
+    best = outs[Math.floor(Math.random() * outs.length)];
+  }
   return best;
 }
 
 function setNext(v) {
-  const lane = v.lane, L = lane.link, N = L.to;
+  const lane = v.lane, L = lane.link;
   v.exitHere = false;
-  if (N.town && (N === v.dest || v.lost)) { v.exitHere = true; v.nextLink = null; v.nextMove = null; return; }
-  const outs = N.transOut.get(L) || [];
+  const D = v.dest;
+  if (!D.att) { v.kill = true; return; }
+  if (L.edge === D.att.edge) {
+    const sd = destS(L, D);
+    if (sd >= v.s - 0.5) { v.exitHere = true; v.arriveS = clamp(sd, lane.s0, lane.s1 - 0.5); v.nextLink = null; v.nextMove = null; return; }
+  }
+  const outs = L.to.transOut.get(L) || [];
   if (!v.nextLink || v.nextLink.dead || !outs.includes(v.nextLink)) v.nextLink = chooseNext(v, L);
   v.nextMove = v.nextLink ? (lane.moves.find(m => m.outLink === v.nextLink) || null) : null;
 }
@@ -172,7 +185,8 @@ function rollErr(v) {
   const r = N.rank.get(L) || 0;
   let p = 0;
   if (N.edges.length >= 3 || N.ring) {
-    if (N.ctl === 'light' || N.ctl === 'allstop') p = 0.0015;
+    if (N.ctl === 'light') p = 0.0015;
+    else if (N.ctl === 'rvl') p = 0.006;
     else if (N.ring) p = r ? 0 : 0.003;
     else if (!r) {
       const majV = N.major ? Math.max(N.major[0].kmh, N.major[1].kmh) : 50;
@@ -182,49 +196,83 @@ function rollErr(v) {
   v.err = Math.random() < p * Sim.errMul;
 }
 
-// ---------- Erzeugung ----------
-function pickDest(t) {
-  let r = Math.random() * t.sumW;
-  for (const d of t.dests) { r -= d.w; if (r <= 0) return d.D; }
-  return t.dests[t.dests.length - 1].D;
+// ---------- Erzeugung: Fahrten von Haus zu Haus ----------
+function pickDest(h) {
+  const D = Sim.dests;
+  if (D.length < 2) return null;
+  let best = null, sum = 0;
+  const cand = [];
+  for (let i = 0; i < 8; i++) {
+    const d = D[Math.floor(Math.random() * D.length)];
+    if (d === h) continue;
+    const dist = Math.hypot(d.x - h.x, d.y - h.y);
+    if (dist < 60) continue;
+    const w = d.weight / (1 + dist / 1500);
+    cand.push([d, w]); sum += w;
+  }
+  let r = Math.random() * sum;
+  for (const [d, w] of cand) { r -= w; if (r <= 0) { best = d; break; } }
+  return best || (cand.length ? cand[cand.length - 1][0] : null);
 }
 
 function spawnStep(dt) {
-  for (const O of Sim.townNodes) {
-    const t = O.town;
-    if (!t.dests.length || !O.outLinks.length) continue;
-    const rate = Sim.demand * t.pop / 1000 * 0.02;
-    if (Math.random() < rate * dt) {
-      if (t.queue.length < 30) t.queue.push(pickDest(t));
-      else Sim.stats.rejected++;
+  const H = Sim.homes;
+  if (H.length && Sim.dests.length > 1) {
+    const x = H.length * Sim.demand / 150 * dt;
+    let k = Math.floor(x) + (Math.random() < x - Math.floor(x) ? 1 : 0);
+    while (k-- > 0) {
+      const h = H[Math.floor(Math.random() * H.length)];
+      const d = pickDest(h);
+      if (d && Sim.pending.length < 300) Sim.pending.push({ h, d, t: Sim.time });
     }
-    if (t.queue.length && Sim.vehicles.length < MAX_VEH) trySpawn(O, t);
   }
+  if (!Sim.pending.length) return;
+  const keep = [];
+  let tries = 0;
+  for (const p of Sim.pending) {
+    if (tries++ > 25 || Sim.vehicles.length >= MAX_VEH) { keep.push(p); continue; }
+    if (!p.h.att || !p.d.att) continue;
+    const r = trySpawn(p.h, p.d);
+    if (r === 'wait' && Sim.time - p.t < 90) keep.push(p);
+  }
+  Sim.pending = keep;
 }
 
-function trySpawn(O, t) {
-  const D = t.queue[0];
-  const cost = Sim.routes.get(D.id);
-  if (D.deleted || !cost) { t.queue.shift(); return; }
-  let L = null, bc = Infinity;
-  for (const o of O.outLinks) if (cost[o.id] < bc) { bc = cost[o.id]; L = o; }
-  if (!L) { t.queue.shift(); return; }
-  const cands = L.lanes.filter(ln => { const f = ln.vehicles[0]; return !f || f.s - f.len > ln.s0 + 3; });
-  if (!cands.length) return;
-  const tmp = { dest: D, lost: false };
-  const nl = L.to === D ? null : chooseNext(tmp, L);
-  let pref = nl ? cands.filter(ln => ln.moves.some(m => m.outLink === nl)) : cands;
-  if (!pref.length) pref = cands;
-  const lane = pref[Math.floor(Math.random() * pref.length)];
-  const v = newVehicle(lane, D, O);
-  const f = lane.vehicles[0];
-  v.v = Math.min(L.speed * 0.6, f ? f.v : 99);
-  lane.vehicles.unshift(v);
+function startChoice(h, D) {
+  const E = h.att.edge, cost = routeCost(D.att.edge);
+  let best = null;
+  for (const L of [E.linkF, E.linkB]) {
+    if (!L) continue;
+    const ln = L.lanes[0];
+    const s = clamp(L.dir > 0 ? h.att.u : E.len - h.att.u, ln.s0 + 1, ln.s1 - 2);
+    let c;
+    if (E === D.att.edge) { const sd = destS(L, D); if (sd > s + 5) c = (sd - s) / L.speed; }
+    if (c === undefined) {
+      let mo = Infinity;
+      for (const o of (L.to.transOut.get(L) || [])) mo = Math.min(mo, cost[o.id]);
+      c = (ln.s1 - s) / Math.max(2, L.avgV) + (L.to.pen.get(L) || 0) + mo;
+    }
+    if (c < Infinity && (!best || c < best.c)) best = { L, s, c };
+  }
+  return best;
+}
+
+function trySpawn(h, D) {
+  const ch = startChoice(h, D);
+  if (!ch) return 'fail';
+  const lane = ch.L.lanes[0], s = ch.s;
+  const a = lane.vehicles;
+  const i = lowerBound(a, s);
+  const lead = a[i], foll = a[i - 1];
+  if (lead && lead.s - lead.len - s < 4) return 'wait';
+  if (foll && s - 4.8 - foll.s < 3 + foll.v * 1.3) return 'wait';
+  const v = newVehicle(lane, D, h);
+  v.s = s; v.v = 0;
+  a.splice(i, 0, v);
   Sim.vehicles.push(v);
-  v.nextLink = nl;
   setNext(v);
   rollErr(v);
-  t.queue.shift(); t.sent++;
+  return 'ok';
 }
 
 // ---------- Ampeln ----------
@@ -243,7 +291,6 @@ function updateLights(dt) {
           if (a.length && ln.s1 - a[a.length - 1].s < 70) demOther = true;
         }
       }
-      // Zeitluecken-Steuerung: Gruen endet, wenn niemand mehr durchfaehrt
       const gap = Sim.time - (lt.lastPass || 0);
       if (demOther && ((lt.t > 7 && gap > 3.5) || lt.t > 32)) { lt.stage = 'Y'; lt.t = 0; }
     } else if (lt.stage === 'Y') {
@@ -265,7 +312,7 @@ function idmAcc(v, v0, gap, vl) {
   return p.a * (1 - r * r * r * r - (ss / g) * (ss / g));
 }
 function freeAcc(v, v0) { const r = v.v / Math.max(v0, 0.5); return v.drv.a * (1 - r * r * r * r); }
-// Zeit bis Strecke D zurueckgelegt ist (Beschleunigung bis vmax, dann konstant)
+
 function tReach(u, D, vmax) {
   if (D <= 0) return 0;
   const a = Math.max(0.6, u.drv.a), vv = u.v;
@@ -275,9 +322,8 @@ function tReach(u, D, vmax) {
   if (d1 >= D) return (-vv + Math.sqrt(vv * vv + 2 * a * D)) / a;
   return t1 + (D - d1) / vmax;
 }
-function uV0(u) { return u.lane ? laneV0(u, u.lane.link) : u.move ? u.move.vmax : 15; }
-
 function laneV0(v, L) { return Math.min(L.speed * v.drv.vf, L.edge.curveV, v.drv.vmax); }
+function uV0(u) { return u.lane ? laneV0(u, u.lane.link) : u.move ? u.move.vmax : 15; }
 
 function computeAccel(v) {
   if (v.crashed) { v.acc = 0; v.v = 0; return; }
@@ -291,7 +337,7 @@ function computeAccel(v) {
     if (v.idx + 1 < arr.length && arr[v.idx + 1] !== v) {
       const ld = arr[v.idx + 1];
       acc = Math.min(acc, idmAcc(v, v0, ld.s - ld.len - v.s, ld.v));
-    } else if (distEnd < 160) {
+    } else if (distEnd < 160 && !v.exitHere) {
       const lo = lane.lastOut;
       if (lo && !lo.dead && lo.move) acc = Math.min(acc, idmAcc(v, v0, distEnd + lo.s - lo.len, lo.v));
       const m = v.nextMove;
@@ -305,7 +351,11 @@ function computeAccel(v) {
         }
       }
     }
-    if (distEnd < 220 && !v.exitHere) {
+    if (v.exitHere) {
+      // in die Einfahrt abbiegen: auf ~15 km/h abbremsen
+      const d = v.arriveS - v.s;
+      if (v.v > 4.5) { const need = (v.v * v.v - 20) / (2 * Math.max(d, 1)); if (need > 0.6) acc = Math.min(acc, -need); }
+    } else if (distEnd < 220) {
       const m = v.nextMove;
       if (!m) {
         acc = Math.min(acc, idmAcc(v, v0, distEnd + 0.5, 0));
@@ -356,8 +406,7 @@ function intersectionOk(v, m, dist) {
         if (u === v || !u.move) continue;
         const c = m.conf.get(u.move);
         if (c && !c.merge && u.s < c.sOther + u.len * 0.5 + 1) {
-          const need = v.v * v.v / (2 * Math.max(dist - 0.5, 0.3));
-          if (need < 9.5) return false;
+          if (v.v * v.v / (2 * Math.max(dist - 0.5, 0.3)) < 9.5) return false;
         }
       }
     }
@@ -368,18 +417,19 @@ function intersectionOk(v, m, dist) {
   if (N.edges.length <= 2 && !N.ring) return true;
   const L = m.inLane.link;
   const rank = N.rank.get(L) || 0;
-  const mustStop = N.ctl === 'allstop' || (N.ctl === 'stop' && rank === 0);
-  if (mustStop && !v.stopped) {
-    if (dist < 4.5 && v.v < 0.6) { v.stopped = true; v.stopT = Sim.time; }
-    else return false;
-  }
+  let yieldAll = false;
   if (N.ctl === 'light') {
     const st = lightState(N, L);
-    if (st === 'R') return false;
-    if (st === 'Y') {
-      // wartende Linksabbieger raeumen bei Gelb (Nachzuegler)
+    if (st === 'R') {
+      // Gruenpfeil: nach Halt rechts abbiegen, allen Vorrang gewaehren
+      if (!(N.gruen && m.kind === 'R')) return false;
+      if (!v.stopped) {
+        if (dist < 4.5 && v.v < 0.6) { v.stopped = true; v.stopT = Sim.time; } else return false;
+      }
+      yieldAll = true;
+    } else if (st === 'Y') {
       if (dist < 4 && v.v < 2) {
-        if (!mayEnter(v, m, dist)) return false;
+        if (!mayEnter(v, m, dist, false)) return false;
         commit(v, m);
         return true;
       }
@@ -387,18 +437,18 @@ function intersectionOk(v, m, dist) {
       commit(v, m);
       return true;
     }
+  } else if (N.ctl === 'stop' && rank === 0 && !v.stopped) {
+    if (dist < 4.5 && v.v < 0.6) { v.stopped = true; v.stopT = Sim.time; } else return false;
   }
-  if (!mayEnter(v, m, dist)) return false;
+  if (!mayEnter(v, m, dist, yieldAll)) return false;
   if (dist < v.v * v.v / 9 + 2.5) commit(v, m);
   return true;
 }
 
 function hasPrio(N, u, mu, v, m) {
-  if (N.ctl === 'allstop') return u.stopped && (!v.stopped || u.stopT < v.stopT);
   if (N.ctl === 'light') {
     if (m.kind === 'U') return true;
-    if (m.kind === 'L' && mu.kind !== 'L') return true;
-    return false;
+    return m.kind === 'L' && mu.kind !== 'L';
   }
   const ru = N.rank.get(mu.inLane.link) || 0, rv = N.rank.get(m.inLane.link) || 0;
   if (ru !== rv) return ru > rv;
@@ -410,15 +460,14 @@ function hasPrio(N, u, mu, v, m) {
   return (-hu.x) * (-hv.y) + (-hu.y) * hv.x > 0.1;
 }
 
-function mayEnter(v, m, dist) {
+function mayEnter(v, m, dist, yieldAll) {
   const N = m.node;
   const ol = m.outLane, q = ol.vehicles[0];
   if (q && q.s - q.len - ol.s0 < v.len + 1 && q.v < 0.8) return false;
   for (const u of m.vehicles) if (u.s < u.len + 1 && u.v < 1) return false;
   const imp = Math.max(0.35, 1 - v.waitT / 60);
-  const margin = 0.5 + 1.0 * v.drv.gap * imp;
+  const margin = 0.5 + 1.0 * v.drv.gap * imp + (yieldAll ? 1 : 0);
   const vmV = Math.min(m.vmax, laneV0(v, m.outLink));
-  // Fahrzeuge im Knoten oder fest eingefahren
   for (const u of N.occ) {
     if (u === v || u.dead) continue;
     const mu = u.move || u.committed;
@@ -430,11 +479,10 @@ function mayEnter(v, m, dist) {
     } else {
       const du = u.lane.s1 - u.s;
       if (u.crashed && du < 8) return false;
-      const eta = tReach(u, du + c.sOther, uV0(u));
-      if (eta < tReach(v, dist + c.sSelf + v.len + 1, vmV) + margin) return false;
+      if (tReach(u, du + c.sOther, uV0(u)) < tReach(v, dist + c.sSelf + v.len + 1, vmV) + margin) return false;
     }
   }
-  if (v.err) return true;
+  if (v.err && !yieldAll) return true;
   const isLight = N.ctl === 'light';
   for (const L of N.inLinks) {
     if (L === m.inLane.link) continue;
@@ -447,16 +495,15 @@ function mayEnter(v, m, dist) {
         const u = a[i];
         const du = ln.s1 - u.s;
         if (du > 220) break;
-        if (u.committed || u.crashed || u.dead) continue;
-        // stehender Rueckstau hinter dem ersten Fahrzeug kann nicht sofort kommen
+        if (u.committed || u.crashed || u.dead || u.exitHere) continue;
         if (u.v < 1.5 && i < a.length - 1 && !a[i + 1].committed) break;
         cnt++;
         const mu = u.nextMove;
         if (!mu) continue;
         const c = m.conf.get(mu);
         if (!c) continue;
-        if (!hasPrio(N, u, mu, v, m)) continue;
-        if (u.v < 0.5 && u.waitT > 2 && v.waitT > u.waitT + 2) continue;
+        if (!yieldAll && !hasPrio(N, u, mu, v, m)) continue;
+        if (u.v < 0.5 && u.waitT > 2 && v.waitT > u.waitT + 2 && !yieldAll) continue;
         if (st === 'Y' && du > u.v * u.v / 7 + 1.5) continue;
         const eta = tReach(u, du + c.sOther, Math.min(uV0(u), mu.vmax + 3));
         if (eta < tReach(v, dist + c.sSelf + v.len + 1, vmV) + margin) return false;
@@ -477,6 +524,7 @@ function integrate(v, dt) {
   if (v.lcCool > 0) v.lcCool -= dt;
   if (v.lane) {
     const lane = v.lane;
+    if (v.exitHere && v.s >= v.arriveS) { finishTrip(v); return; }
     if (v.s >= lane.s1) {
       if (v.exitHere) { finishTrip(v); return; }
       let m = v.nextMove;
@@ -518,15 +566,6 @@ function laneGood(ln, v) {
   if (v.exitHere || !v.nextLink) return true;
   return ln.moves.some(m => m.outLink === v.nextLink);
 }
-function lanePosIdx(ln) { return ln.turn ? ln.link.n : ln.idx; }
-function laneNeighbors(lane) {
-  const L = lane.link, res = [];
-  if (lane.turn) { res.push(L.lanes[L.n - 1]); return res; }
-  if (lane.idx > 0) res.push(L.lanes[lane.idx - 1]);
-  if (lane.idx < L.n - 1) res.push(L.lanes[lane.idx + 1]);
-  if (lane.idx === L.n - 1 && L.turnLane) res.push(L.turnLane);
-  return res;
-}
 function lowerBound(a, s) {
   let lo = 0, hi = a.length;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid].s < s) lo = mid + 1; else hi = mid; }
@@ -548,38 +587,33 @@ function laneSafe(v, nb, urg) {
   if (foll) {
     const g = v.s - v.len - foll.s;
     if (g < 1.5 + foll.v * 0.55 * urg) return false;
-    const fa = idmAcc(foll, laneV0(foll, nb.link), g, v.v);
-    if (fa < -2.2 - (1 - urg) * 3) return false;
+    if (idmAcc(foll, laneV0(foll, nb.link), g, v.v) < -2.2 - (1 - urg) * 3) return false;
   }
   return true;
 }
 function tryLaneChange(v) {
   const lane = v.lane, L = lane.link;
-  if (L.allLanes.length < 2) return;
+  const al = L.allLanes;
+  if (al.length < 2) return;
   const distEnd = lane.s1 - v.s;
   if (distEnd < 5) return;
-  const good = laneGood(lane, v);
-  const nbs = laneNeighbors(lane).filter(nb => v.s >= nb.s0 + 0.5 && v.s < nb.s1 - 4);
+  const nbs = [al[lane.slot - 1], al[lane.slot + 1]].filter(nb => nb && v.s >= nb.s0 + 0.5 && v.s < nb.s1 - 4);
   if (!nbs.length) return;
-  if (!good) {
-    const goodLanes = L.allLanes.filter(ln => laneGood(ln, v));
-    if (!goodLanes.length) return;
-    const p = lanePosIdx(lane);
+  if (!laneGood(lane, v)) {
     let tgt = 999;
-    for (const ln of goodLanes) { const q = lanePosIdx(ln); if (Math.abs(q - p) < Math.abs(tgt - p)) tgt = q; }
-    const nb = nbs.find(n => Math.abs(lanePosIdx(n) - tgt) < Math.abs(p - tgt));
-    if (!nb) return;
-    const urg = clamp(distEnd / 150, 0.15, 1);
-    if (laneSafe(v, nb, urg)) doLaneChange(v, nb);
+    for (const ln of al) if (laneGood(ln, v) && Math.abs(ln.slot - lane.slot) < Math.abs(tgt - lane.slot)) tgt = ln.slot;
+    if (tgt === 999) return;
+    const nb = nbs.find(n => Math.abs(n.slot - tgt) < Math.abs(lane.slot - tgt));
+    if (nb && laneSafe(v, nb, clamp(distEnd / 150, 0.15, 1))) doLaneChange(v, nb);
     return;
   }
-  if (distEnd < 50) return;
+  if (distEnd < 50 || lane.kind !== 'N') return;
   const v0 = laneV0(v, L);
   const accHere = leaderAcc(v, lane, v0);
   for (const nb of nbs) {
-    if (nb.turn || !laneGood(nb, v)) continue;
+    if (nb.kind !== 'N' || !laneGood(nb, v)) continue;
     const gain = leaderAcc(v, nb, v0) - accHere;
-    const right = nb.idx < lane.idx;
+    const right = nb.slot < lane.slot;
     if (((right && gain > -0.1 && v.v > 6) || (!right && gain > 0.6)) && laneSafe(v, nb, 1)) { doLaneChange(v, nb); return; }
   }
 }
@@ -608,9 +642,8 @@ function sortLanes() {
 // ---------- Unfaelle ----------
 function vehPose(v, out) {
   out = out || {};
-  if (v.lane) {
-    lanePos(v.lane, v.s - v.len / 2, v.lcOff, out);
-  } else if (v.move) {
+  if (v.lane) lanePos(v.lane, v.s - v.len / 2, v.lcOff, out);
+  else if (v.move) {
     const sc = v.s - v.len / 2;
     movePos(v.move, Math.max(0, sc), out);
     if (sc < 0) { out.x += out.hx * sc; out.y += out.hy * sc; }
@@ -645,8 +678,7 @@ function checkCollisions() {
     const a = ln.vehicles;
     for (let i = 0; i < a.length - 1; i++) {
       const f = a[i], l = a[i + 1];
-      const g = l.s - l.len - f.s;
-      if (g < -0.3) {
+      if (l.s - l.len - f.s < -0.3) {
         if (f.v - l.v > 5 && !f.crashed) crash(f, l, null, ln.link.edge);
         else if (!f.crashed) { f.s = l.s - l.len - 0.2; f.v = Math.min(f.v, l.v); }
       }
@@ -675,6 +707,8 @@ function updateStats() {
     if (v.dead || !v.lane) continue;
     const L = v.lane.link;
     L.vsum += v.v; L.vcnt++;
+    // normales Anhalten/Anfahren an Kreuzungen und Einfahrten ist kein Stau
+    if (v.exitHere || v.lane.s1 - v.s < 45 || v.s - v.lane.s0 < 20 || Sim.time - v.spawnT < 10) continue;
     const v0 = Math.min(L.speed, L.edge.curveV);
     sumR += Math.min(1, v.v / v0);
     if (v.v < v0 * 0.25) jam++;
@@ -687,29 +721,24 @@ function updateStats() {
     L.flowCnt = 0;
   }
   for (const N of Net.nodes.values()) { N.thr = N.thr * 0.98 + N.thrCnt * 3600 * 0.02; N.thrCnt = 0; }
-  const fi = n ? sumR / n : 1;
-  Sim.flowIdx += (fi - Sim.flowIdx) * 0.15;
+  Sim.flowIdx += ((n ? sumR / n : 1) - Sim.flowIdx) * 0.15;
   Sim.jam += ((n ? jam / n : 0) - Sim.jam) * 0.15;
 }
 
 function pushHistory() {
   const st = Sim.stats;
-  Sim.history.push({
-    t: Sim.time, n: Sim.vehicles.length, flow: Sim.flowIdx, jam: Sim.jam,
-    trips: st.trips - Sim.histTrips, acc: st.accidents - Sim.histAcc,
-  });
+  Sim.history.push({ t: Sim.time, n: Sim.vehicles.length, flow: Sim.flowIdx, jam: Sim.jam, trips: st.trips - Sim.histTrips, acc: st.accidents - Sim.histAcc });
   Sim.histTrips = st.trips; Sim.histAcc = st.accidents;
   if (Sim.history.length > 240) Sim.history.shift();
 }
 
 function simRating() {
-  const H = Sim.history.slice(-120); // letzte 10 Minuten
+  const H = Sim.history.slice(-120);
   let trips = 0, acc = 0;
   for (const h of H) { trips += h.trips; acc += h.acc; }
   const minutes = Math.max(1, H.length * 5 / 60);
-  const accRate = acc / (trips + 40) * 1000; // gegen kleine Stichproben gedaempft
-  let score = Sim.flowIdx * 100 - Math.min(45, accRate * 2) - Sim.jam * 25;
-  score = clamp(score, 0, 100);
+  const accRate = acc / (trips + 40) * 1000;
+  const score = clamp(Sim.flowIdx * 100 - Math.min(45, accRate * 2) - Sim.jam * 25, 0, 100);
   const grade = score >= 85 ? 'A' : score >= 72 ? 'B' : score >= 58 ? 'C' : score >= 45 ? 'D' : score >= 30 ? 'E' : 'F';
   return { score, grade, accRate, tripsPerH: trips / minutes * 60, accWin: acc };
 }
