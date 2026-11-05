@@ -12,7 +12,7 @@ const SPEEDS = [1, 2, 4, 8];
 const UIInsets = { bottom: 90, top: 56 };
 
 const UI = {
-  tool: 'road', curve: false, level: 0, preset: 'stadt', spec: Object.assign({}, ROAD_PRESETS.stadt),
+  tool: 'road', level: 0, preset: 'stadt', spec: Object.assign({}, ROAD_PRESETS.stadt),
   stage: 0, start: null, draw: null, pend: null, handleDrag: false,
   mouse: { x: 0, y: 0, sx: 0, sy: 0, has: false }, shift: false,
   pointers: new Map(), pinch: null, keys: new Set(), lastToast: 0, sheet: null, sheetArg: null,
@@ -111,12 +111,10 @@ function renderCtx() {
   }
   if (UI.tool === 'road') {
     html += `<div class="seg">${[[0, 'Boden'], [1, '🌉 Brücke'], [-1, '🚇 Tunnel']].map(([l, n]) => `<button data-level="${l}" class="${UI.level === l ? 'on' : ''}">${n}</button>`).join('')}</div>`;
-    html += `<button id="curveChip" class="pill ${UI.curve ? 'on' : ''}">〰️ Kurve</button>`;
   }
   if (UI.tool !== 'road') html += `<div class="hintTxt">${t.hint}</div>`;
   el.innerHTML = html;
   const tc = $('typeChip'); if (tc) tc.onclick = () => toggleSheet('type');
-  const cc = $('curveChip'); if (cc) cc.onclick = () => { UI.curve = !UI.curve; cancelBuild(); renderCtx(); toast(UI.curve ? '〰️ Kurve: ziehen, dann gelben Punkt verschieben' : 'Kurvenmodus aus'); };
   el.querySelectorAll('[data-level]').forEach(b => b.onclick = () => { UI.level = +b.dataset.level; renderCtx(); });
   requestAnimationFrame(measureInsets);
 }
@@ -124,13 +122,14 @@ function renderCtx() {
 function renderFloat() {
   const el = $('floatBtns');
   let html = '';
-  if (UI.pend) html = `<button id="fbBuild" class="fb ok">✓ Bauen</button><button id="fbCancel" class="fb">✕</button>`;
+  if (UI.pend) html = `<button id="fbStraight" class="fb" title="Gerade machen">⟋</button><button id="fbCancel" class="fb">✕</button><button id="fbBuild" class="fb ok">✓ Bauen</button>`;
   else if (UI.stage === 1) html = `<button id="fbDone" class="fb">✓ Fertig</button>`;
   if (el.dataset.html === html) return;
   el.dataset.html = html;
   el.innerHTML = html;
   if ($('fbBuild')) $('fbBuild').onclick = buildPending;
   if ($('fbCancel')) $('fbCancel').onclick = cancelBuild;
+  if ($('fbStraight')) $('fbStraight').onclick = () => { if (UI.pend) UI.pend.c = mid(UI.pend.s0, UI.pend.s1); };
   if ($('fbDone')) $('fbDone').onclick = cancelBuild;
 }
 
@@ -172,6 +171,7 @@ function onPointerDown(e) {
 function onPointerMove(e) {
   const l = localXY(e);
   const p = UI.pointers.get(e.pointerId);
+  const prev = p ? { x: p.x, y: p.y } : null;
   if (p) { p.x = l.x; p.y = l.y; }
   if (UI.pinch && UI.pointers.size >= 2) {
     const [a, b] = [...UI.pointers.values()];
@@ -181,7 +181,6 @@ function onPointerMove(e) {
     UI.pinch.d = d; UI.pinch.mx = mx; UI.pinch.my = my;
     return;
   }
-  const prev = { x: UI.mouse.sx, y: UI.mouse.sy };
   UI.mouse.sx = l.x; UI.mouse.sy = l.y;
   const w = s2w(l.x, l.y);
   UI.mouse.x = w.x; UI.mouse.y = w.y; UI.mouse.has = true;
@@ -189,7 +188,7 @@ function onPointerMove(e) {
   if (!p) { if (e.pointerType === 'mouse') updateHover(); return; }
   if (!p.moved && Math.hypot(l.x - p.sx, l.y - p.sy) > (p.type === 'mouse' ? 5 : 10)) {
     p.moved = true;
-    if (!UI.handleDrag && isRoadTool() && p.button === 0 && !UI.pend) {
+    if (!UI.handleDrag && !p.panOnly && isRoadTool() && p.button === 0 && !UI.pend) {
       const ws = s2w(p.sx, p.sy);
       UI.stage = 0; UI.start = null;
       UI.draw = { start: snapPoint(ws.x, ws.y, View.scale), end: null };
@@ -205,7 +204,14 @@ function onPointerMove(e) {
 function onPointerUp(e) {
   const p = UI.pointers.get(e.pointerId);
   UI.pointers.delete(e.pointerId);
-  if (UI.pinch) { if (UI.pointers.size < 2) UI.pinch = null; return; }
+  if (UI.pinch) {
+    if (UI.pointers.size < 2) {
+      UI.pinch = null;
+      // verbleibender Finger: nur noch verschieben, kein Bauen/Tippen
+      for (const q of UI.pointers.values()) { q.moved = true; q.panOnly = true; }
+    }
+    return;
+  }
   if (!p) return;
   if (UI.handleDrag) { UI.handleDrag = false; return; }
   if (UI.draw) { finishDraw(); return; }
@@ -238,7 +244,6 @@ function onKeyDown(e) {
   const t = TOOLS.find(x => x.key === e.key);
   if (t) { setTool(t.id); return; }
   if (k === 'escape') { cancelBuild(); closeSheet(); $('help').classList.add('hidden'); }
-  else if (k === 'c') { UI.curve = !UI.curve; cancelBuild(); renderCtx(); }
   else if (k === 'b') { UI.level = UI.level === 0 ? 1 : UI.level === 1 ? -1 : 0; renderCtx(); }
   else if (k === ' ') { e.preventDefault(); setPaused(!Sim.paused); }
   else if (k === 'f') $('flowBtn').click();
@@ -268,11 +273,38 @@ function currentSnap(ref) {
 
 function mid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
 
+// Gewuenschte Richtung an einem Strassenende, damit die Fortsetzung nahtlos (tangential) anschliesst
+function endTangent(sn, isStart) {
+  if (!sn || sn.type !== 'node' || !sn.node || sn.node.deleted || sn.node.edges.length !== 1) return null;
+  const e = sn.node.edges[0];
+  if (!e.tx) return null;
+  const d = edgeDirAt(e, sn.node);
+  return isStart ? { x: -d.x, y: -d.y } : { x: d.x, y: d.y };
+}
+
+function autoCtrl(s0, s1) {
+  const dx = s1.x - s0.x, dy = s1.y - s0.y, L = Math.hypot(dx, dy);
+  if (L < 1) return mid(s0, s1);
+  let t0 = endTangent(s0, true), t1 = endTangent(s1, false);
+  if (t0 && (t0.x * dx + t0.y * dy) / L < 0.05) t0 = null;
+  if (t1 && (t1.x * dx + t1.y * dy) / L < 0.05) t1 = null;
+  if (t0 && t1) {
+    const det = t0.x * t1.y - t0.y * t1.x;
+    if (Math.abs(det) > 0.02) {
+      const a = (dx * t1.y - dy * t1.x) / det, b = (t0.x * dy - t0.y * dx) / det;
+      if (a > 0 && b > 0 && a < 1.5 * L && b < 1.5 * L) return { x: s0.x + t0.x * a, y: s0.y + t0.y * a };
+    } else return mid(s0, s1);
+  }
+  if (t0) return { x: s0.x + t0.x * L * 0.5, y: s0.y + t0.y * L * 0.5 };
+  if (t1) return { x: s1.x - t1.x * L * 0.5, y: s1.y - t1.y * L * 0.5 };
+  return mid(s0, s1);
+}
+
 function updatePreview() {
   let p0, p1, c, s0, s1, handle = false;
   if (UI.pend) { p0 = s0 = UI.pend.s0; p1 = s1 = UI.pend.s1; c = UI.pend.c; handle = true; }
-  else if (UI.draw && UI.draw.end) { p0 = s0 = UI.draw.start; p1 = s1 = UI.draw.end; c = mid(p0, p1); }
-  else if (UI.stage === 1 && UI.mouse.has) { p0 = s0 = UI.start; p1 = s1 = currentSnap(UI.start); c = mid(p0, p1); }
+  else if (UI.draw && UI.draw.end) { p0 = s0 = UI.draw.start; p1 = s1 = UI.draw.end; c = autoCtrl(p0, p1); }
+  else if (UI.stage === 1 && UI.mouse.has) { p0 = s0 = UI.start; p1 = s1 = currentSnap(UI.start); c = autoCtrl(p0, p1); }
   else { View.preview = null; return; }
   const len = Math.hypot(c.x - p0.x, c.y - p0.y) + Math.hypot(p1.x - c.x, p1.y - c.y);
   View.preview = { p0, c, p1, spec: UI.spec, level: UI.level, ok: len >= 10, snap0: s0, snap1: s1, handle, len };
@@ -288,9 +320,8 @@ function finishDraw() {
   const d = UI.draw;
   UI.draw = null;
   if (!d.end) return;
-  if (UI.curve) { UI.pend = { s0: d.start, s1: d.end, c: mid(d.start, d.end) }; renderFloat(); return; }
-  doBuild(d.start, null, d.end);
-  View.preview = null;
+  UI.pend = { s0: d.start, s1: d.end, c: autoCtrl(d.start, d.end) };
+  renderFloat();
 }
 
 function buildPending() {
@@ -348,9 +379,7 @@ function onTap() {
     if (UI.pend) { UI.pend.c = { x, y }; return; }
     const sn = currentSnap(UI.start);
     if (UI.stage === 0) { UI.start = sn; UI.stage = 1; renderFloat(); return; }
-    if (UI.curve) { UI.pend = { s0: UI.start, s1: sn, c: mid(UI.start, sn), chain: true }; UI.stage = 0; renderFloat(); return; }
-    const res = doBuild(UI.start, null, sn);
-    if (res.ok) UI.start = { type: 'node', node: res.end, x: res.end.x, y: res.end.y };
+    UI.pend = { s0: UI.start, s1: sn, c: autoCtrl(UI.start, sn), chain: true }; UI.stage = 0; renderFloat();
     return;
   }
   updateHover();

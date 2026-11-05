@@ -26,7 +26,7 @@ function bbIn(bb, r, pad) { return !(bb.x1 < r.x0 - pad || bb.x0 > r.x1 + pad ||
 // ---------- Gelaende ----------
 function drawTerrain(ctx, r) {
   const s = View.scale;
-  const lod = s >= 0.2 ? 0 : s >= 0.06 ? 1 : 2;
+  const lod = s >= 1.0 ? 0 : s >= 0.2 ? 1 : s >= 0.06 ? 2 : 3;
   const { size } = CHUNK_LODS[lod];
   const c0 = Math.floor(r.x0 / size), c1 = Math.floor(r.x1 / size);
   const r0 = Math.floor(r.y0 / size), r1 = Math.floor(r.y1 / size);

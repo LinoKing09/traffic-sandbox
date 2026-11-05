@@ -18,7 +18,7 @@ Die Verkehrssimulation zeigt, ob deine Konstruktion flüssig läuft oder Staus u
 
 | Werkzeug | Funktion |
 |---|---|
-| 🛣️ Straße | Ziehen = bauen (oder tippen, tippen, „Fertig“). Straßentyp, Boden/Brücke/Tunnel und Kurve in der Leiste darüber |
+| 🛣️ Straße | Ziehen (oder tippen, tippen), dann mit dem gelben Punkt die Kurve formen und „✓ Bauen“. Fortsetzungen am Straßenende schließen automatisch tangential an. Straßentyp und Boden/Brücke/Tunnel in der Leiste darüber |
 | 🚦 Kreuzung | Rechts vor links · Vorfahrtstraße (auch abknickend) · Stoppschild · adaptive Ampel mit Grünpfeil · Kreisverkehr |
 | ↱ Spuren | Zufahrt antippen: Fahrstreifen, bis zu 2 Links- und 1 Rechtsabbiegespur, Richtungspfeile je Spur (ohne Pfeil = Abbiegeverbot) |
 | 🔧 Umbauen | Gewählten Straßentyp übernehmen, Einbahnstraße umdrehen |
@@ -26,7 +26,7 @@ Die Verkehrssimulation zeigt, ob deine Konstruktion flüssig läuft oder Staus u
 | 🔍 Info | Verkehrsstärke, Tempo, Wartezeit, Unfälle |
 
 **Bedienung:** Touch – ein Finger baut, zwei Finger verschieben/zoomen. Maus – Linksziehen baut,
-Rechtsziehen verschiebt, Mausrad zoomt. Tastatur: `1`–`6` Werkzeuge, `C` Kurve, `B` Ebene, `F` Fluss-Ansicht, Leertaste Pause.
+Rechtsziehen verschiebt, Mausrad zoomt. Tastatur: `1`–`6` Werkzeuge, `Enter` bauen, `B` Ebene, `F` Fluss-Ansicht, Leertaste Pause.
 
 ## Simulation
 

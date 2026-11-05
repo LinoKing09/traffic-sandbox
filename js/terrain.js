@@ -1,6 +1,7 @@
 'use strict';
 // ---------- Prozedurale, unendliche Landschaft ----------
 const CHUNK_LODS = [
+  { size: 128, res: 256 },
   { size: 256, res: 128 },
   { size: 1024, res: 128 },
   { size: 4096, res: 128 },
@@ -69,52 +70,93 @@ const Terrain = {
     if (!allowGen) return null;
     c = this.genChunk(lod, cx, cy);
     this.chunks.set(key, c);
-    if (this.chunks.size > 700) this.evict();
+    if (this.chunks.size > 320) this.evict();
     return c;
   },
   evict() {
     const arr = [...this.chunks.entries()].sort((a, b) => a[1].used - b[1].used);
-    for (let i = 0; i < 200; i++) this.chunks.delete(arr[i][0]);
+    for (let i = 0; i < 90; i++) this.chunks.delete(arr[i][0]);
   },
   genChunk(lod, cx, cy) {
     const { size, res } = CHUNK_LODS[lod];
     const px = size / res;
     const x0 = cx * size, y0 = cy * size;
-    const n1 = res + 1;
-    const E = new Float32Array(n1 * n1);
-    for (let j = 0; j < n1; j++) for (let i = 0; i < n1; i++) {
-      E[j * n1 + i] = this.elev(x0 + (i - 0.5) * px, y0 + (j - 0.5) * px);
+    const s = this.seed;
+    // grobes Raster fuer Hoehe/Fluss/Wald, dazwischen interpoliert
+    const g = lod <= 1 ? 4 : 2, gn = res / g + 3, gs = px * g;
+    const GE = new Float32Array(gn * gn), GR = new Float32Array(gn * gn), GW = new Float32Array(gn * gn), GF = new Float32Array(gn * gn);
+    for (let j = 0; j < gn; j++) for (let i = 0; i < gn; i++) {
+      const x = x0 + (i - 1) * gs, y = y0 + (j - 1) * gs, k = j * gn + i;
+      const e = this.elev(x, y);
+      GE[k] = e; GR[k] = this.riverVal(x, y); GW[k] = this.riverW(x, y);
+      GF[k] = (e > 0.28 && e < 0.78) ? this.forestVal(x, y) : 0;
     }
+    const smp = (A, x, y) => {
+      const fx = (x - x0) / gs + 1, fy = (y - y0) / gs + 1;
+      const i = clamp(Math.floor(fx), 0, gn - 2), j = clamp(Math.floor(fy), 0, gn - 2);
+      const u = fx - i, v = fy - j, k = j * gn + i;
+      return (A[k] * (1 - u) + A[k + 1] * u) * (1 - v) + (A[k + gn] * (1 - u) + A[k + gn + 1] * u) * v;
+    };
+    const classAt = (x, y) => this.classify(smp(GE, x, y), smp(GR, x, y), smp(GW, x, y), smp(GF, x, y));
     const cv = document.createElement('canvas');
     cv.width = res; cv.height = res;
     const ctx = cv.getContext('2d');
     const img = ctx.createImageData(res, res);
     const d = img.data;
-    const s = this.seed;
+    const shadeK = [40, 14, 4, 1.2][lod];
+    const fine = lod <= 1;
     for (let j = 0; j < res; j++) for (let i = 0; i < res; i++) {
       const x = x0 + (i + 0.5) * px, y = y0 + (j + 0.5) * px;
-      const e = E[(j + 1) * n1 + i + 1];
-      const shade = (e - E[j * n1 + i]) * (lod === 0 ? 14 : lod === 1 ? 4 : 1.2);
-      const r = this.riverVal(x, y), rw = this.riverW(x, y);
-      const f = (e > 0.3 && e < 0.76) ? this.forestVal(x, y) : 0;
-      const t = this.classify(e, r, rw, f);
-      const nz = (hash01(Math.floor(x / 2), Math.floor(y / 2), s) - 0.5) * 10;
+      const e = smp(GE, x, y);
+      const shade = (e - smp(GE, x - gs, y - gs)) * shadeK / g;
+      const t = this.classify(e, smp(GR, x, y), smp(GW, x, y), smp(GF, x, y));
+      // weiches Detailrauschen statt Pixelrauschen
+      let dn = vnoise(x / 9, y / 9, s + 50) - 0.5;
+      if (fine) dn = dn * 0.65 + (vnoise(x / 2.6, y / 2.6, s + 51) - 0.5) * 0.35;
       let R, G, B;
       switch (t) {
-        case 0: { const k = clamp((0.25 - e) * 4, 0, 1); R = lerp(70, 34, k); G = lerp(130, 84, k); B = lerp(185, 150, k); break; }
-        case 1: R = 66; G = 128; B = 186; break;
-        case 2: R = 214; G = 202; B = 150; break;
-        case 3: { const k = clamp((e - 0.3) / 0.36, 0, 1); R = lerp(118, 132, k); G = lerp(168, 160, k); B = lerp(82, 88, k); break; }
-        case 4: R = 62 + nz * 0.6; G = 108 + nz; B = 58; break;
-        case 5: R = 128; G = 140; B = 92; break;
-        case 6: R = 140; G = 134; B = 126; break;
-        default: R = 236; G = 240; B = 246;
+        case 0: { const k = clamp((0.25 - e) * 4, 0, 1); R = lerp(72, 34, k); G = lerp(132, 84, k); B = lerp(186, 150, k); R += dn * 6; G += dn * 8; B += dn * 8; break; }
+        case 1: R = 66 + dn * 6; G = 128 + dn * 8; B = 186 + dn * 8; break;
+        case 2: R = 214 + dn * 14; G = 202 + dn * 14; B = 150 + dn * 10; break;
+        case 3: { const k = clamp((e - 0.3) / 0.36, 0, 1); R = lerp(116, 132, k) + dn * 16; G = lerp(166, 160, k) + dn * 20; B = lerp(80, 88, k) + dn * 8; break; }
+        case 4: R = 58 + dn * 12; G = 100 + dn * 16; B = 54 + dn * 8; break;
+        case 5: R = 126 + dn * 14; G = 138 + dn * 16; B = 92 + dn * 8; break;
+        case 6: R = 140 + dn * 22; G = 134 + dn * 22; B = 126 + dn * 22; break;
+        default: R = 236 + dn * 8; G = 240 + dn * 8; B = 246 + dn * 6;
       }
-      if (t >= 2) { const k = 1 + clamp(shade, -0.35, 0.35); R *= k; G *= k; B *= k; R += nz; G += nz; B += nz * 0.6; }
+      if (t >= 2) { const k = 1 + clamp(shade, -0.3, 0.3); R *= k; G *= k; B *= k; }
       const o = (j * res + i) * 4;
       d[o] = R; d[o + 1] = G; d[o + 2] = B; d[o + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    // Baeume (nur nahe Zoomstufen)
+    if (fine) {
+      const cell = lod === 0 ? 4.5 : 6;
+      const c0x = Math.floor(x0 / cell) - 1, c1x = Math.floor((x0 + size) / cell) + 1;
+      const c0y = Math.floor(y0 / cell) - 1, c1y = Math.floor((y0 + size) / cell) + 1;
+      const k = 1 / px;
+      const tws = this.townsInRect(x0 - 300, y0 - 300, x0 + size + 300, y0 + size + 300).map(t => [t.x, t.y, (this.townRadius(t) * 0.9) ** 2]);
+      for (let cyy = c0y; cyy <= c1y; cyy++) for (let cxx = c0x; cxx <= c1x; cxx++) {
+        const h = hash01(cxx, cyy, s + 99);
+        if (h > 0.9) continue;
+        const tx = (cxx + hash01(cxx, cyy, s + 101)) * cell, ty = (cyy + hash01(cxx, cyy, s + 102)) * cell;
+        if (tws.some(([X, Y, R2]) => (tx - X) ** 2 + (ty - Y) ** 2 < R2)) continue;
+        const t = classAt(tx, ty);
+        const dens = t === 4 ? 0.9 : t === 5 ? 0.07 : t === 3 ? 0.025 : 0;
+        if (h >= dens) continue;
+        const r = (t === 4 ? 2.2 : 2.6) + hash01(cxx, cyy, s + 103) * 1.6;
+        const X = (tx - x0) * k, Y = (ty - y0) * k, Rk = r * k;
+        const tone = hash01(cxx, cyy, s + 104);
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.arc(X + Rk * 0.35, Y + Rk * 0.45, Rk, 0, TAU); ctx.fill();
+        ctx.fillStyle = `rgb(${38 + tone * 30 | 0},${78 + tone * 36 | 0},${36 + tone * 18 | 0})`;
+        ctx.beginPath(); ctx.arc(X, Y, Rk, 0, TAU); ctx.fill();
+        if (lod === 0) {
+          ctx.fillStyle = 'rgba(150,200,110,0.22)';
+          ctx.beginPath(); ctx.arc(X - Rk * 0.3, Y - Rk * 0.3, Rk * 0.55, 0, TAU); ctx.fill();
+        }
+      }
+    }
     return { cv, used: performance.now(), x0, y0, size };
   },
 
@@ -155,7 +197,7 @@ const Terrain = {
     }
     return out;
   },
-  townRadius(t) { return 40 + Math.sqrt(t.pop) * 0.75; },
+  townRadius(t) { return 45 + Math.sqrt(t.pop) * 0.9; },
   townHouses(t) {
     if (t.houses) return t.houses;
     const r = rng(hashInt(Math.round(t.x), Math.round(t.y), this.seed + 21));
@@ -166,7 +208,7 @@ const Terrain = {
       const a = r() * TAU, d = Math.pow(r(), 0.75) * R;
       const x = t.x + Math.cos(a) * d, y = t.y + Math.sin(a) * d;
       if (Math.hypot(x - t.x, y - t.y) < 14) continue;
-      if (hs.some(o => Math.abs(o.x - x) < 11 && Math.abs(o.y - y) < 11)) continue;
+      if (hs.some(o => Math.abs(o.x - x) < 17 && Math.abs(o.y - y) < 17)) continue;
       const inf = this.info(x, y);
       if (inf.water || inf.rock) continue;
       const big = d < R * 0.35 && t.pop > 2500 && r() < 0.5;
