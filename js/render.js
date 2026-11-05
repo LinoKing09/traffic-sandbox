@@ -170,8 +170,23 @@ function drawEdgeSurface(ctx, e, style) {
     return;
   }
   ctx.fillStyle = style;
-  roadPath(ctx, e, 0, e.n, 0, 0.6);
+  // Rampen enden am Fahrbahnrand der Autobahn
+  const i0 = e.A.ramp && e.A.ramp.r === e ? Math.min(e.n - 1, Math.ceil(e.trimA / e.step)) : 0;
+  const i1 = e.B.ramp && e.B.ramp.r === e ? Math.max(i0 + 1, Math.floor((e.len - e.trimB) / e.step)) : e.n;
+  roadPath(ctx, e, i0, i1, 0, 0.6);
   ctx.fill();
+}
+
+// Verbindungsflaeche Rampe <-> Zusatzstreifen
+function drawRampConnector(ctx, N) {
+  ctx.strokeStyle = COL.asphalt; ctx.lineWidth = LANE_W + 0.6; ctx.lineCap = 'round';
+  for (const m of N.moves) {
+    if (m.inLane.link.edge !== N.ramp.r && m.outLink.edge !== N.ramp.r) continue;
+    ctx.beginPath();
+    for (let i = 0; i < m.xs.length; i++) (i ? ctx.lineTo(m.xs[i], m.ys[i]) : ctx.moveTo(m.xs[i], m.ys[i]));
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
 }
 
 // Markierungen ueber einen Knick zwischen zwei Strassen hinweg weiterfuehren
@@ -381,7 +396,11 @@ function drawEdgeSigns(ctx, e) {
   const s = View.scale;
   if (s < 0.9 || e.ring) return;
   // Fortsetzung derselben Strasse an einem einfachen Uebergang?
-  const cont = (N, f) => { if (N.edges.length !== 2) return false; const o = N.edges[0] === e ? N.edges[1] : N.edges[0]; return !o.ring && f(o); };
+  const cont = (N, f) => {
+    if (N.ramp && isFast(e)) { const o = N.edges.find(x => x !== e && isFast(x)); return !!o && f(o); }
+    if (N.edges.length !== 2) return false;
+    const o = N.edges[0] === e ? N.edges[1] : N.edges[0]; return !o.ring && f(o);
+  };
   // Einbahnstrasse (Zeichen 220) und Verbot der Einfahrt (Zeichen 267)
   if (e.nB === 0 && e.len > 30 && !cont(e.A, o => o.nB === 0)) {
     const ln = e.linkF.lanes[0];
@@ -391,7 +410,7 @@ function drawEdgeSigns(ctx, e) {
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(-1, -0.15); ctx.lineTo(0.5, -0.15); ctx.lineTo(0.5, -0.35); ctx.lineTo(1.05, 0); ctx.lineTo(0.5, 0.35); ctx.lineTo(0.5, 0.15); ctx.lineTo(-1, 0.15); ctx.fill();
     ctx.restore();
   }
-  if (e.nB === 0 && e.len > 30 && e.B.edges.length >= 3) {
+  if (e.nB === 0 && e.len > 30 && e.B.edges.length >= 3 && !e.B.ramp) {
     const u = e.len - e.trimB - 3;
     const q = edgeSample(e, u, {});
     const l = -(edgeLeft(e, u) + 1.4);
@@ -549,7 +568,8 @@ function render() {
   for (const e of ground) drawEdgeSurface(ctx, e, COL.asphalt);
   if (s >= 0.12) {
     ctx.fillStyle = COL.asphalt;
-    for (const N of nodes) if (N.edges.length >= 2 && N.edges.some(e => e.level === 0) && N.trim > 0.05 && nodePoly(ctx, N)) ctx.fill();
+    for (const N of nodes) if (N.edges.length >= 2 && N.edges.some(e => e.level === 0) && N.trim > 0.05 && !N.ramp && nodePoly(ctx, N)) ctx.fill();
+    for (const N of nodes) if (N.ramp) drawRampConnector(ctx, N);
   }
   const ringIds = new Set();
   for (const N of nodes) if (N.ring) ringIds.add(N.ring);

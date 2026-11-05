@@ -189,7 +189,10 @@ function zoneB(e, u) {
   const ze = e.trimA + turnLen(e, false);
   return smooth01((ze + TAPER - u) / TAPER);
 }
-function turnLen(e, f) { return (f ? e.decF : e.decB) ? DEC_LEN : TURN_LEN; }
+function turnLen(e, f) {
+  if (f ? e.weaveF : e.weaveB) return Math.max(20, e.len - e.trimA - e.trimB); // Verflechtungsstreifen
+  return (f ? e.decF : e.decB) ? DEC_LEN : TURN_LEN;
+}
 // Einfaedelungsstreifen am Anfang eines Links (vorwaerts: Ende A, rueckwaerts: Ende B)
 function accZF(e, u) { if (!e.zaF) return 0; return smooth01((e.trimA + e.accLenF + TAPER - u) / TAPER); }
 function accZB(e, u) { if (!e.zaB) return 0; return smooth01((u - (e.len - e.trimB - e.accLenB - TAPER)) / TAPER); }
@@ -270,6 +273,21 @@ function rampSetup(N) {
 }
 
 function computeTrims(N) {
+  if (N.ramp) {
+    const r = N.ramp.r, rd = edgeDirAt(r, N);
+    let sinPhi = 1, hwo = 0;
+    for (const e of N.edges) {
+      if (e === r) continue;
+      if (e.A === N) e.trimA = 0; else e.trimB = 0;
+      const d = edgeDirAt(e, N);
+      sinPhi = Math.min(sinPhi, Math.abs(rd.x * d.y - rd.y * d.x));
+      hwo = Math.max(hwo, e.hw + LANE_W);
+    }
+    const t = clamp((hwo + 0.5) / Math.max(sinPhi, 0.12) * 0.75, 5, 60);
+    if (r.A === N) r.trimA = t; else r.trimB = t;
+    N.trim = 0;
+    return;
+  }
   const deg = N.edges.length;
   const data = N.edges.map(e => ({ e, d: edgeDirAt(e, N), hw: hwAt(e, N) }));
   let maxT = 0;
@@ -342,17 +360,21 @@ function buildLinks(e) {
     resizeLanes(L.lanes, n, i => newLane(L, 'N', i, 0), () => L.lanes[L.lanes.length - 1]);
     for (const ln of L.lanes) { ln.s0 = s0; ln.s1 = s1; }
     const tl = dir > 0 ? e.tlF : e.tlB, tr = Math.max(dir > 0 ? e.trF : e.trB, dir > 0 ? e.decF : e.decB);
+    const wantA = dir > 0 ? e.accF : e.accB, wantD = dir > 0 ? e.decF : e.decB;
+    // Auf- und Abfahrt zu nah beieinander: ein durchgehender Verflechtungsstreifen
+    const weave = !!(wantA && wantD && (s1 - s0) < ACC_LEN + DEC_LEN + 2 * TAPER + 20);
+    if (dir > 0) e.weaveF = weave; else e.weaveB = weave;
+    L.weave = weave;
     const tLen = turnLen(e, dir > 0);
-    const ok = (tl + tr) > 0 && (s1 - s0) > tLen + TAPER + 8;
+    const ok = weave || ((tl + tr) > 0 && (s1 - s0) > tLen + TAPER + 8);
     if (dir > 0) { e.okF = ok; e.zlF = ok ? tl : 0; e.zrF = ok ? tr : 0; }
     else { e.okB = ok; e.zlB = ok ? tl : 0; e.zrB = ok ? tr : 0; }
     resizeLanes(L.tl, ok ? tl : 0, j => newLane(L, 'L', n, j), () => L.lanes[n - 1]);
     resizeLanes(L.tr, ok ? tr : 0, j => newLane(L, 'R', -1, j), () => L.lanes[0]);
     for (const ln of L.tl.concat(L.tr)) { ln.s0 = s1 - tLen; ln.s1 = s1; if (ln.kind === 'L') ln.idx = n; }
     // Einfaedelungsstreifen
-    const wantA = dir > 0 ? e.accF : e.accB;
     const accLen = Math.min(ACC_LEN, (s1 - s0) - (ok ? tLen + TAPER : 0) - TAPER - 10);
-    const okA = wantA > 0 && accLen >= 50;
+    const okA = wantA > 0 && !weave && accLen >= 40;
     if (dir > 0) { e.zaF = okA ? 1 : 0; e.accLenF = okA ? accLen : 0; } else { e.zaB = okA ? 1 : 0; e.accLenB = okA ? accLen : 0; }
     if (!L.acc) L.acc = [];
     resizeLanes(L.acc, okA ? 1 : 0, j => newLane(L, 'A', -1, j), () => L.lanes[0]);
@@ -508,8 +530,9 @@ function buildNode(N) {
   }
   for (const [o, feeders] of byOut) {
     // Auffahrt: Rampe faehrt auf den Einfaedelungsstreifen
-    if (o.acc && o.acc.length && N.ramp && feeders.size > 1) {
-      for (const [Lin, ps] of [...feeders]) if (Lin.edge === N.ramp.r) { for (const p of ps) p.outLane = o.acc[0]; feeders.delete(Lin); }
+    const auxIn = (o.acc && o.acc[0]) || (o.weave && o.tr[0]);
+    if (auxIn && N.ramp && feeders.size > 1) {
+      for (const [Lin, ps] of [...feeders]) if (Lin.edge === N.ramp.r) { for (const p of ps) p.outLane = auxIn; feeders.delete(Lin); }
     }
     const m = o.n;
     const hO = linkHeadStart(o), aO = Math.atan2(hO.y, hO.x);
@@ -829,6 +852,25 @@ function resolveSnap(sn) {
   return N || addNode(sn.x, sn.y);
 }
 
+// Rampen muessen (in Fahrtrichtung) von rechts kommen bzw. nach rechts abgehen
+function rampWrongSide(sn, isOn, other, c) {
+  let e, u;
+  if (sn.type === 'edge') { e = sn.edge; u = sn.u; }
+  else { e = sn.node.edges.find(isFast); if (!e) return null; u = e.A === sn.node ? 0 : e.len; }
+  const p = edgeSample(e, u, {});
+  // Richtung der Rampe am Anschluss
+  let hx = isOn ? sn.x - c.x : c.x - sn.x, hy = isOn ? sn.y - c.y : c.y - sn.y;
+  if (Math.hypot(hx, hy) < 1) { hx = isOn ? sn.x - other.x : other.x - sn.x; hy = isOn ? sn.y - other.y : other.y - sn.y; }
+  const fwd = hx * p.tx + hy * p.ty >= 0;
+  if (!fwd && e.nB === 0) return 'Diese Fahrbahn fährt in die andere Richtung';
+  const side = (other.x - p.x) * -p.ty + (other.y - p.y) * p.tx; // >0: rechts der Vorwaertsrichtung
+  if (fwd ? side < 0 : side > 0) {
+    return isOn ? 'Auffahrten münden von rechts ein – für die Gegenrichtung auf der anderen Seite ansetzen'
+      : 'Abfahrten zweigen nach rechts ab – für die Gegenrichtung auf der anderen Seite ansetzen';
+  }
+  return null;
+}
+
 function buildRoad(s0, ctrl, s1, spec, level) {
   const p0 = { x: s0.x, y: s0.y }, p1 = { x: s1.x, y: s1.y };
   const c = ctrl ? { x: ctrl.x, y: ctrl.y } : { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
@@ -842,6 +884,8 @@ function buildRoad(s0, ctrl, s1, spec, level) {
       if (!touchesFast(sn)) continue;
       if (spec.nB !== 0) return { ok: false, msg: 'Autobahn/Bundesstraße: nur Auf- und Abfahrten (Einbahnstraße) anschließen. Zum Kreuzen einfach drüberbauen – die Brücke entsteht automatisch.' };
       if (sn.type === 'node' && sn.node.edges.length >= 3) return { ok: false, msg: 'Hier ist schon eine Anschlussstelle – etwas weiter entfernt ansetzen' };
+      const wrong = rampWrongSide(sn, sn === s1, sn === s1 ? s0 : s1, c);
+      if (wrong) return { ok: false, msg: wrong };
     }
   }
   const crosses = [], overs = [];
