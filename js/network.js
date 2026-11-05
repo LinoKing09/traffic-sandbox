@@ -304,7 +304,7 @@ function computeTrims(N) {
         else v = (b.hw + a.hw * Math.cos(phi)) / Math.sin(phi);
         t = Math.max(t, clamp(v, 0, 30));
       }
-      if (deg >= 3 || N.ring) t += N.ring ? 1 : 2;
+      if (deg >= 3 || N.ring) t += N.ring ? 2 : 4.5; // Platz fuer abgerundete Bordsteinecken
       if (deg === 2) {
         const o = data[0] === a ? data[1].e : data[0].e;
         // gleicher Querschnitt: nahtloser Uebergang ohne Kreuzungsflaeche

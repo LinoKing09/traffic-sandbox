@@ -159,6 +159,58 @@ function nodePoly(ctx, N) {
   return true;
 }
 
+// Ecken eines Knotens: je Strasse die beiden Randpunkte, sortiert im Kreis
+function nodeCorners(N, inset) {
+  const items = [];
+  for (const e of N.edges) {
+    const atA = e.A === N;
+    const u = atA ? e.trimA : e.len - e.trimB;
+    const p = edgeSample(e, u, {});
+    const d = atA ? { x: p.tx, y: p.ty } : { x: -p.tx, y: -p.ty };
+    const R = edgeRight(e, u) - inset, Lf = edgeLeft(e, u) - inset;
+    const P1 = { x: p.x - p.ty * R, y: p.y + p.tx * R }, P2 = { x: p.x + p.ty * Lf, y: p.y - p.tx * Lf };
+    const B = d.x * (P1.y - p.y) - d.y * (P1.x - p.x) > 0 ? P1 : P2;
+    items.push({ ang: Math.atan2(d.y, d.x), d, A: B === P1 ? P2 : P1, B });
+  }
+  return items.sort((a, b) => a.ang - b.ang);
+}
+// Kontrollpunkt fuer die Bordsteinrundung: Schnitt der verlaengerten Raender
+function cornerCtrl(B, dB, A, dA) {
+  const rx = -dB.x, ry = -dB.y, sx = -dA.x, sy = -dA.y;
+  const den = rx * sy - ry * sx;
+  if (Math.abs(den) < 1e-3) return null;
+  const qx = A.x - B.x, qy = A.y - B.y;
+  const t = (qx * sy - qy * sx) / den, u = (qx * ry - qy * rx) / den;
+  if (t <= 0 || u <= 0 || t > 80 || u > 80) return null;
+  return { x: B.x + rx * t, y: B.y + ry * t };
+}
+function roundedNodePath(ctx, N) {
+  const it = nodeCorners(N, 0);
+  if (it.length < 2) return false;
+  ctx.beginPath();
+  ctx.moveTo(it[0].A.x, it[0].A.y);
+  for (let i = 0; i < it.length; i++) {
+    const a = it[i], b = it[(i + 1) % it.length];
+    ctx.lineTo(a.B.x, a.B.y);
+    const c = cornerCtrl(a.B, a.d, b.A, b.d);
+    if (c) ctx.quadraticCurveTo(c.x, c.y, b.A.x, b.A.y); else ctx.lineTo(b.A.x, b.A.y);
+  }
+  ctx.closePath();
+  return true;
+}
+// Randlinien um die abgerundeten Ecken
+function drawCornerLines(ctx, N) {
+  if (View.scale < 1 || N.ring) return;
+  const it = nodeCorners(N, 0.35);
+  ctx.strokeStyle = COL.mark; ctx.lineWidth = 0.15; ctx.setLineDash([]);
+  for (let i = 0; i < it.length; i++) {
+    const a = it[i], b = it[(i + 1) % it.length];
+    const c = cornerCtrl(a.B, a.d, b.A, b.d);
+    if (!c) continue;
+    ctx.beginPath(); ctx.moveTo(a.B.x, a.B.y); ctx.quadraticCurveTo(c.x, c.y, b.A.x, b.A.y); ctx.stroke();
+  }
+}
+
 function drawEdgeSurface(ctx, e, style) {
   const s = View.scale;
   if (s < 0.12) {
@@ -175,6 +227,13 @@ function drawEdgeSurface(ctx, e, style) {
   const i1 = e.B.ramp && e.B.ramp.r === e ? Math.max(i0 + 1, Math.floor((e.len - e.trimB) / e.step)) : e.n;
   roadPath(ctx, e, i0, i1, 0, 0.6);
   ctx.fill();
+  // runde Enden an Sackgassen
+  for (const [N, u] of [[e.A, 0], [e.B, e.len]]) {
+    if (N.edges.length !== 1) continue;
+    const p = edgeSample(e, u, {});
+    const R = edgeRight(e, u), Lf = edgeLeft(e, u), off = (R - Lf) / 2;
+    ctx.beginPath(); ctx.arc(p.x - p.ty * off, p.y + p.tx * off, (R + Lf) / 2, 0, TAU); ctx.fill();
+  }
 }
 
 // Verbindungsflaeche Rampe <-> Zusatzstreifen
@@ -291,14 +350,22 @@ function drawLaneArrow(ctx, x, y, hx, hy, mask) {
 }
 
 function drawBridgeDeck(ctx, e, i0, i1) {
+  // runde Enden, wo die Bruecke an einer Sackgasse endet
+  const caps = [];
+  if (i0 === 0 && e.A.edges.length === 1) caps.push(0);
+  if (i1 === e.n && e.B.edges.length === 1) caps.push(e.len);
+  const layer = (ext, dx, dy) => {
+    roadPath(ctx, e, i0, i1, ext); ctx.fill();
+    for (const u of caps) {
+      const p = edgeSample(e, u, {});
+      const R = edgeRight(e, u) + ext, Lf = edgeLeft(e, u) + ext, off = (R - Lf) / 2;
+      ctx.beginPath(); ctx.arc(p.x - p.ty * off + dx, p.y + p.tx * off + dy, (R + Lf) / 2, 0, TAU); ctx.fill();
+    }
+  };
   ctx.fillStyle = COL.shadow;
-  ctx.save(); ctx.translate(2.2, 3.2);
-  roadPath(ctx, e, i0, i1, 1.2); ctx.fill();
-  ctx.restore();
-  ctx.fillStyle = COL.bridgeEdge;
-  roadPath(ctx, e, i0, i1, 1.0); ctx.fill();
-  ctx.fillStyle = COL.bridge;
-  roadPath(ctx, e, i0, i1, 0.4); ctx.fill();
+  ctx.save(); ctx.translate(2.2, 3.2); layer(1.2, 0, 0); ctx.restore();
+  ctx.fillStyle = COL.bridgeEdge; layer(1.0, 0, 0);
+  ctx.fillStyle = COL.bridge; layer(0.4, 0, 0);
 }
 
 function isJunction(N) { return N.edges.length >= 3 || N.ring; }
@@ -458,11 +525,11 @@ function drawVehicles(ctx, list, alpha) {
     }
     ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(-L / 2 + 0.3, -Wd / 2 + 0.4, L, Wd);
     if (v.truck) {
-      ctx.fillStyle = v.color; ctx.fillRect(-L / 2, -Wd / 2, L - 2.6, Wd);
+      ctx.fillStyle = v.color; carBody(ctx, -L / 2, -Wd / 2, L - 2.6, Wd, s > 1.2 ? 0.35 : 0);
       ctx.fillStyle = '#3d4b5c'; ctx.fillRect(L / 2 - 2.4, -Wd / 2 + 0.05, 2.4, Wd - 0.1);
       if (s > 1.5) { ctx.fillStyle = '#9fc6e6'; ctx.fillRect(L / 2 - 0.7, -Wd / 2 + 0.25, 0.45, Wd - 0.5); }
     } else {
-      ctx.fillStyle = v.color; ctx.fillRect(-L / 2, -Wd / 2, L, Wd);
+      ctx.fillStyle = v.color; carBody(ctx, -L / 2, -Wd / 2, L, Wd, s > 1.2 ? 0.6 : 0);
       if (s > 1.5) {
         ctx.fillStyle = 'rgba(20,30,45,0.75)';
         ctx.fillRect(L * 0.08, -Wd / 2 + 0.2, L * 0.2, Wd - 0.4);
@@ -474,6 +541,11 @@ function drawVehicles(ctx, list, alpha) {
   }
   ctx.globalAlpha = 1;
   setWorldTf(ctx);
+}
+
+function carBody(ctx, x, y, w, h, r) {
+  if (!r || !ctx.roundRect) { ctx.fillRect(x, y, w, h); return; }
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
 }
 
 function vehLayer(v) {
@@ -568,7 +640,7 @@ function render() {
   for (const e of ground) drawEdgeSurface(ctx, e, COL.asphalt);
   if (s >= 0.12) {
     ctx.fillStyle = COL.asphalt;
-    for (const N of nodes) if (N.edges.length >= 2 && N.edges.some(e => e.level === 0) && N.trim > 0.05 && !N.ramp && nodePoly(ctx, N)) ctx.fill();
+    for (const N of nodes) if (N.edges.length >= 2 && N.edges.every(e => e.level === 0) && N.trim > 0.05 && !N.ramp && roundedNodePath(ctx, N)) ctx.fill();
     for (const N of nodes) if (N.ramp) drawRampConnector(ctx, N);
   }
   const ringIds = new Set();
@@ -590,6 +662,7 @@ function render() {
   }
   for (const e of ground) drawMarkings(ctx, e);
   for (const N of nodes) if (N.edges.length === 2 && N.edges.every(e => e.level === 0)) drawJointMarks(ctx, N);
+  for (const N of nodes) if (N.edges.length >= 3 && !N.ramp && N.edges.every(e => e.level === 0)) drawCornerLines(ctx, N);
   for (const N of nodes) drawStopLines(ctx, N);
   if (View.showFlow) drawFlowOverlay(ctx, ground);
   drawVehicles(ctx, vG, 1);
