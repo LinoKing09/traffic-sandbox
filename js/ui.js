@@ -62,9 +62,16 @@ function uiInit() {
   $('saveBtn').onclick = () => { saveGame(); toast('💾 Gespeichert'); };
   $('loadBtn').onclick = () => { if (loadGame()) toast('📂 Spielstand geladen'); else toast('Kein Spielstand gefunden'); };
   $('newBtn').onclick = () => {
-    const s = prompt('Neue Welt erzeugen. Seed (Zahl) eingeben:', String(Math.floor(Math.random() * 1e6)));
-    if (s === null) return;
-    newWorld(Math.abs(parseInt(s, 10)) || 1);
+    const pop = $('popup');
+    pop.innerHTML = `<div class="ptitle">Neue Welt erzeugen</div>
+      <label class="pstat" for="seedInput">Seed (gleicher Seed = gleiche Landschaft)</label>
+      <input id="seedInput" type="number" min="1" value="${Math.floor(Math.random() * 1e6) + 1}">
+      <button id="seedGo" class="on">🌍 Erzeugen (aktuelles Netz wird verworfen)</button>
+      <button id="seedCancel">Abbrechen</button>`;
+    pop.style.left = Math.max(10, View.W - 280) + 'px'; pop.style.top = '64px';
+    pop.classList.remove('hidden');
+    $('seedGo').onclick = () => { newWorld(Math.abs(parseInt($('seedInput').value, 10)) || 1); hidePopup(); toast('🌍 Neue Welt erzeugt'); };
+    $('seedCancel').onclick = () => hidePopup();
   };
   $('helpBtn').onclick = () => $('help').classList.remove('hidden');
   $('helpClose').onclick = () => $('help').classList.add('hidden');
