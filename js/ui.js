@@ -580,7 +580,11 @@ function menuSheet() {
 
 function wireSheet(k, a) {
   const body = $('sheetBody');
-  body.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => { UI.spec = Object.assign({}, ROAD_PRESETS[b.dataset.preset]); renderSheet(); renderCtx(); });
+  body.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
+    UI.spec = Object.assign({}, ROAD_PRESETS[b.dataset.preset]); renderSheet(); renderCtx();
+    if (UI.spec.median > 0) toast('Kreuzungsfrei: Querende Straßen werden überbrückt, Anschluss nur über Auf-/Abfahrt');
+    else if (b.dataset.preset === 'rampe') toast('Auf-/Abfahrt an Autobahn oder Bundesstraße ansetzen – Ein-/Ausfädelungsstreifen entstehen automatisch');
+  });
   body.querySelectorAll('[data-kmh]').forEach(b => b.onclick = () => { UI.spec.speed = +b.dataset.kmh; renderSheet(); renderCtx(); });
   const mc = $('medianChk'); if (mc) mc.onchange = () => { UI.spec.median = mc.checked && UI.spec.nB ? 3 : 0; renderSheet(); renderCtx(); };
   body.querySelectorAll('[data-step]').forEach(b => b.onclick = () => {

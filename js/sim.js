@@ -565,6 +565,7 @@ function integrate(v, dt) {
 
 // ---------- Spurwechsel ----------
 function laneGood(ln, v) {
+  if (ln.kind === 'A') return false; // Einfaedelungsstreifen endet
   if (v.exitHere || !v.nextLink) return true;
   return ln.moves.some(m => m.outLink === v.nextLink);
 }
@@ -598,9 +599,18 @@ function tryLaneChange(v) {
   const al = L.allLanes;
   if (al.length < 2) return;
   const distEnd = lane.s1 - v.s;
-  if (distEnd < 5) return;
-  const nbs = [al[lane.slot - 1], al[lane.slot + 1]].filter(nb => nb && v.s >= nb.s0 + 0.5 && v.s < nb.s1 - 4);
+  if (distEnd < 5 && lane.kind !== 'A') return;
+  // naechste an dieser Stelle vorhandene Spur je Seite (Zusatzstreifen existieren nur abschnittsweise)
+  // (in den Einfaedelungsstreifen wird nie hineingewechselt)
+  const side = (d) => { for (let k = lane.slot + d; k >= 0 && k < al.length; k += d) { const ln = al[k]; if (ln.kind === 'A') continue; if (v.s >= ln.s0 + 0.5 && v.s < ln.s1 - 4) return ln; } return null; };
+  const nbs = [side(-1), side(1)].filter(Boolean);
   if (!nbs.length) return;
+  if (lane.kind === 'A') {
+    // Einfaedeln: immer zuerst auf die Fahrbahn, je naeher am Ende desto kleinere Luecken
+    const nb = side(1);
+    if (nb && laneSafe(v, nb, clamp(distEnd / 160, 0.15, 1))) doLaneChange(v, nb);
+    return;
+  }
   if (!laneGood(lane, v)) {
     let tgt = 999;
     for (const ln of al) if (laneGood(ln, v) && Math.abs(ln.slot - lane.slot) < Math.abs(tgt - lane.slot)) tgt = ln.slot;

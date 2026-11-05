@@ -11,6 +11,9 @@ Die Verkehrssimulation zeigt, ob deine Konstruktion flüssig läuft oder Staus u
 - In der Landschaft liegen Dörfer und Städte. **Häuser neben einer Straße werden automatisch angebunden**
   (Grundstückszufahrt). Von dort fahren Autos und LKW zu anderen angebundenen Häusern und Geschäften.
 - Straßen auf Häusern reißen diese ab. Autobahnen und Straßen mit Mittelstreifen haben keine Zufahrten.
+- **Autobahn und Bundesstraße (mit Mittelstreifen) sind kreuzungsfrei:** Querende Straßen werden automatisch
+  überbrückt. Angeschlossen wird nur über einspurige Auf-/Abfahrten – der Einfädelungs- bzw.
+  Ausfädelungsstreifen entsteht automatisch, Auffahrende wechseln per Spurwechsel auf die Fahrbahn.
 - Im Kern geht es ums Ausprobieren: Abbiegespuren, Richtungspfeile, Vorfahrtsregeln, Ampeln,
   Kreisverkehre, Einbahnstraßen, Brücken und Tunnel.
 

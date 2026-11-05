@@ -225,12 +225,16 @@ function drawMarkings(ctx, e) {
   }
   for (const L of [e.linkF, e.linkB]) {
     if (!L) continue;
-    const al = L.allLanes;
-    for (let k = 0; k + 1 < al.length; k++) {
-      const turn = al[k].kind !== 'N' || al[k + 1].kind !== 'N';
+    const pairs = [];
+    for (let k = 1; k < L.n; k++) pairs.push([L.lanes[k - 1], L.lanes[k]]);
+    if (L.tl.length) { pairs.push([L.lanes[L.n - 1], L.tl[0]]); for (let j = 1; j < L.tl.length; j++) pairs.push([L.tl[j - 1], L.tl[j]]); }
+    if (L.tr.length) pairs.push([L.tr[0], L.lanes[0]]);
+    if (L.acc && L.acc.length) pairs.push([L.acc[0], L.lanes[0]]);
+    for (const [a, b] of pairs) {
+      const turn = a.kind !== 'N' || b.kind !== 'N';
       ctx.setLineDash(turn ? [1.5, 1.5] : [3, 6]);
-      ctx.lineWidth = turn ? 0.25 : 0.15;
-      laneDivider(ctx, L, al[k], al[k + 1]);
+      ctx.lineWidth = turn ? 0.3 : 0.15;
+      laneDivider(ctx, L, a, b);
     }
   }
   ctx.lineWidth = 0.15;
@@ -286,7 +290,7 @@ function isJunction(N) { return N.edges.length >= 3 || N.ring; }
 
 function drawStopLines(ctx, N) {
   const s = View.scale;
-  if (s < 0.45 || !isJunction(N)) return;
+  if (s < 0.45 || !isJunction(N) || N.ramp) return;
   for (const L of N.inLinks) {
     const rank = N.rank.get(L);
     let style = null, dash = null;
@@ -320,7 +324,7 @@ function drawStopLines(ctx, N) {
 }
 
 function drawSigns(ctx, N) {
-  if (View.scale < 0.75 || !isJunction(N)) return;
+  if (View.scale < 0.75 || !isJunction(N) || N.ramp) return;
   for (const L of N.inLinks) {
     const rank = N.rank.get(L);
     const ln = L.allLanes[0];
